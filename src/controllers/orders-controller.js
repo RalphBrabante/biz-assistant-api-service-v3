@@ -1,6 +1,11 @@
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
+const {
+  isPrivilegedRequest,
+  getAuthenticatedOrganizationId,
+  applyOrganizationWhereScope,
+} = require('../services/request-scope');
 
 function getOrderModel() {
   const models = getModels();
@@ -162,7 +167,7 @@ async function createOrder(req, res) {
       ? req.body.orderedItems
       : [];
     const authUser = req.auth?.user || null;
-    const organizationId = authUser?.organizationId || null;
+    const organizationId = getAuthenticatedOrganizationId(req);
     const authUserId = authUser?.id || null;
 
     payload.organizationId = organizationId;
@@ -291,6 +296,12 @@ async function listOrders(req, res) {
     const where = {};
 
     if (req.query.organizationId) where.organizationId = req.query.organizationId;
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(400).json({ ok: false, message: 'organizationId is required for this user.' });
+      }
+    }
     if (req.query.userId) where.userId = req.query.userId;
     if (req.query.customerId) where.customerId = req.query.customerId;
     if (req.query.status) where.status = req.query.status;
@@ -344,7 +355,16 @@ async function getOrderById(req, res) {
     }
     const { Order, OrderItemSnapshot, Customer } = models;
 
-    const order = await Order.findByPk(req.params.id, {
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Order not found.' });
+      }
+    }
+
+    const order = await Order.findOne({
+      where,
       include: [
         {
           model: Customer,
@@ -383,7 +403,14 @@ async function updateOrder(req, res) {
     }
     const { Order, Customer, OrderItemSnapshot, Item, SalesInvoice } = models;
 
-    const order = await Order.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Order not found.' });
+      }
+    }
+    const order = await Order.findOne({ where });
     if (!order) {
       return res.status(404).json({ ok: false, message: 'Order not found.' });
     }
@@ -396,6 +423,10 @@ async function updateOrder(req, res) {
 
     const payload = cleanUndefined(pickOrderPayload(req.body));
     const orderedItems = Array.isArray(req.body.orderedItems) ? req.body.orderedItems : null;
+    if (!isPrivilegedRequest(req)) {
+      delete payload.organizationId;
+      delete payload.userId;
+    }
 
     if (payload.orderNumber !== undefined) {
       return res.status(400).json({ ok: false, message: 'orderNumber is immutable and cannot be updated.' });
@@ -630,7 +661,14 @@ async function deleteOrder(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const order = await Order.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Order not found.' });
+      }
+    }
+    const order = await Order.findOne({ where });
     if (!order) {
       return res.status(404).json({ ok: false, message: 'Order not found.' });
     }

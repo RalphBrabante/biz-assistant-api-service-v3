@@ -1,6 +1,11 @@
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
+const {
+  isPrivilegedRequest,
+  getAuthenticatedOrganizationId,
+  applyOrganizationWhereScope,
+} = require('../services/request-scope');
 
 function getSalesInvoiceModel() {
   const models = getModels();
@@ -45,6 +50,9 @@ async function createSalesInvoice(req, res) {
     }
 
     const payload = cleanUndefined(pickSalesInvoicePayload(req.body));
+    if (!isPrivilegedRequest(req)) {
+      payload.organizationId = getAuthenticatedOrganizationId(req);
+    }
 
     if (!payload.organizationId) {
       return res.status(400).json({ ok: false, message: 'organizationId is required.' });
@@ -81,6 +89,12 @@ async function listSalesInvoices(req, res) {
 
     const where = {};
     if (req.query.organizationId) where.organizationId = req.query.organizationId;
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(400).json({ ok: false, message: 'organizationId is required for this user.' });
+      }
+    }
     if (req.query.orderId) where.orderId = req.query.orderId;
     if (req.query.status) where.status = req.query.status;
     if (req.query.paymentStatus) where.paymentStatus = req.query.paymentStatus;
@@ -123,7 +137,16 @@ async function getSalesInvoiceById(req, res) {
     }
     const { SalesInvoice, Order, OrderItemSnapshot, Customer } = models;
 
-    const salesInvoice = await SalesInvoice.findByPk(req.params.id, {
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Sales invoice not found.' });
+      }
+    }
+
+    const salesInvoice = await SalesInvoice.findOne({
+      where,
       include: [
         {
           model: Order,
@@ -160,7 +183,15 @@ async function updateSalesInvoice(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const salesInvoice = await SalesInvoice.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Sales invoice not found.' });
+      }
+    }
+
+    const salesInvoice = await SalesInvoice.findOne({ where });
     if (!salesInvoice) {
       return res.status(404).json({ ok: false, message: 'Sales invoice not found.' });
     }
@@ -220,7 +251,15 @@ async function deleteSalesInvoice(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const salesInvoice = await SalesInvoice.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Sales invoice not found.' });
+      }
+    }
+
+    const salesInvoice = await SalesInvoice.findOne({ where });
     if (!salesInvoice) {
       return res.status(404).json({ ok: false, message: 'Sales invoice not found.' });
     }

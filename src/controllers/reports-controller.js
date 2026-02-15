@@ -1,6 +1,7 @@
 const { Op, fn, col } = require('sequelize');
 const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
+const { isPrivilegedRequest } = require('../services/request-scope');
 
 function getQuarterDates(year, quarter) {
   const quarterStartMonth = (quarter - 1) * 3;
@@ -39,7 +40,7 @@ function toNumber(value) {
 function resolveOrganizationId(req, fallbackFromBody = null) {
   const authOrgId = req.auth?.user?.organizationId || null;
 
-  if (req.auth?.isPrivileged) {
+  if (isPrivilegedRequest(req)) {
     return req.query.organizationId || fallbackFromBody || authOrgId;
   }
 

@@ -1,6 +1,11 @@
 const { Op } = require('sequelize');
 const { randomUUID } = require('crypto');
 const { getModels } = require('../sequelize');
+const {
+  isPrivilegedRequest,
+  getAuthenticatedOrganizationId,
+  applyOrganizationWhereScope,
+} = require('../services/request-scope');
 
 function getLicenseModel() {
   const models = getModels();
@@ -60,6 +65,9 @@ async function createLicense(req, res) {
     }
 
     const payload = cleanUndefined(pickLicensePayload(req.body));
+    if (!isPrivilegedRequest(req)) {
+      payload.organizationId = getAuthenticatedOrganizationId(req);
+    }
 
     if (!payload.key) {
       payload.key = randomUUID();
@@ -92,6 +100,12 @@ async function listLicenses(req, res) {
 
     const where = {};
     if (req.query.organizationId) where.organizationId = req.query.organizationId;
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(400).json({ ok: false, message: 'organizationId is required for this user.' });
+      }
+    }
     if (req.query.unassigned === 'true') where.organizationId = null;
     if (req.query.planName) where.planName = req.query.planName;
     if (req.query.plan) where.planName = req.query.plan;
@@ -152,7 +166,15 @@ async function getLicenseById(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const license = await License.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'License not found.' });
+      }
+    }
+
+    const license = await License.findOne({ where });
     if (!license) {
       return res.status(404).json({ ok: false, message: 'License not found.' });
     }
@@ -171,7 +193,14 @@ async function updateLicense(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const license = await License.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'License not found.' });
+      }
+    }
+    const license = await License.findOne({ where });
     if (!license) {
       return res.status(404).json({ ok: false, message: 'License not found.' });
     }
@@ -199,7 +228,14 @@ async function deleteLicense(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const license = await License.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'License not found.' });
+      }
+    }
+    const license = await License.findOne({ where });
     if (!license) {
       return res.status(404).json({ ok: false, message: 'License not found.' });
     }
@@ -219,7 +255,14 @@ async function revokeLicense(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const license = await License.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'License not found.' });
+      }
+    }
+    const license = await License.findOne({ where });
     if (!license) {
       return res.status(404).json({ ok: false, message: 'License not found.' });
     }

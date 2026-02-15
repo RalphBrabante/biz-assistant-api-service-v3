@@ -1,6 +1,11 @@
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
+const {
+  isPrivilegedRequest,
+  getAuthenticatedOrganizationId,
+  applyOrganizationWhereScope,
+} = require('../services/request-scope');
 
 function getExpenseModels() {
   const models = getModels();
@@ -55,6 +60,9 @@ async function createExpense(req, res) {
 
     const { Expense, Vendor } = models;
     const payload = cleanUndefined(pickExpensePayload(req.body));
+    if (!isPrivilegedRequest(req)) {
+      payload.organizationId = getAuthenticatedOrganizationId(req);
+    }
 
     if (!payload.organizationId) {
       return res.status(400).json({ ok: false, message: 'organizationId is required.' });
@@ -118,6 +126,12 @@ async function listExpenses(req, res) {
 
     const where = {};
     if (req.query.organizationId) where.organizationId = req.query.organizationId;
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(400).json({ ok: false, message: 'organizationId is required for this user.' });
+      }
+    }
     if (req.query.vendorId) where.vendorId = req.query.vendorId;
     if (req.query.status) where.status = req.query.status;
     if (req.query.paymentMethod) where.paymentMethod = req.query.paymentMethod;
@@ -170,7 +184,16 @@ async function getExpenseById(req, res) {
     }
 
     const { Expense } = models;
-    const expense = await Expense.findByPk(req.params.id, {
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Expense not found.' });
+      }
+    }
+
+    const expense = await Expense.findOne({
+      where,
       include: [
         {
           association: 'vendor',
@@ -198,7 +221,14 @@ async function updateExpense(req, res) {
     }
 
     const { Expense, Vendor } = models;
-    const expense = await Expense.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Expense not found.' });
+      }
+    }
+    const expense = await Expense.findOne({ where });
     if (!expense) {
       return res.status(404).json({ ok: false, message: 'Expense not found.' });
     }
@@ -229,6 +259,10 @@ async function updateExpense(req, res) {
       }
     }
 
+    if (!isPrivilegedRequest(req)) {
+      delete payload.organizationId;
+    }
+
     await expense.update(payload);
     const updated = await Expense.findByPk(expense.id, {
       include: [
@@ -255,7 +289,14 @@ async function deleteExpense(req, res) {
     }
 
     const { Expense } = models;
-    const expense = await Expense.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Expense not found.' });
+      }
+    }
+    const expense = await Expense.findOne({ where });
     if (!expense) {
       return res.status(404).json({ ok: false, message: 'Expense not found.' });
     }

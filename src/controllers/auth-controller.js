@@ -61,6 +61,24 @@ async function login(req, res) {
     const normalizedEmail = String(email).toLowerCase().trim();
     const user = await models.User.findOne({
       where: { email: normalizedEmail },
+      include: models.Role
+        ? [
+            {
+              model: models.Role,
+              as: 'roles',
+              through: { attributes: [] },
+              include: models.Permission
+                ? [
+                    {
+                      model: models.Permission,
+                      as: 'permissions',
+                      through: { attributes: [] },
+                    },
+                  ]
+                : [],
+            },
+          ]
+        : [],
     });
 
     const genericError = {
@@ -125,6 +143,19 @@ async function login(req, res) {
       organizationCurrency = String(organization?.currency || 'USD').toUpperCase().slice(0, 3) || 'USD';
     }
 
+    const roleCodes = (user.roles || []).map((role) =>
+      String(role.code || '').toLowerCase()
+    );
+    const permissionCodes = [];
+    for (const role of user.roles || []) {
+      for (const permission of role.permissions || []) {
+        const code = String(permission.code || '').toLowerCase();
+        if (code && !permissionCodes.includes(code)) {
+          permissionCodes.push(code);
+        }
+      }
+    }
+
     return res.status(200).json({
       ok: true,
       message: 'Login successful.',
@@ -141,6 +172,8 @@ async function login(req, res) {
           isEmailVerified: user.isEmailVerified,
           organizationId: user.organizationId,
           currency: organizationCurrency,
+          roleCodes,
+          permissionCodes,
         },
       },
     });

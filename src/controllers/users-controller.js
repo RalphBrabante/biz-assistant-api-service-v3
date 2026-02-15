@@ -1,5 +1,10 @@
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
+const {
+  isPrivilegedRequest,
+  getAuthenticatedOrganizationId,
+  applyOrganizationWhereScope,
+} = require('../services/request-scope');
 
 function getUserModel() {
   const models = getModels();
@@ -7,6 +12,18 @@ function getUserModel() {
     return null;
   }
   return models.User;
+}
+
+function getUserRoleModels() {
+  const models = getModels();
+  if (!models || !models.User || !models.Role || !models.UserRole) {
+    return null;
+  }
+  return {
+    User: models.User,
+    Role: models.Role,
+    UserRole: models.UserRole,
+  };
 }
 
 function pickUserPayload(body = {}) {
@@ -62,6 +79,9 @@ async function createUser(req, res) {
     }
 
     const payload = cleanUndefined(pickUserPayload(req.body));
+    if (!isPrivilegedRequest(req)) {
+      payload.organizationId = getAuthenticatedOrganizationId(req);
+    }
     if (payload.email) {
       payload.email = String(payload.email).toLowerCase().trim();
     }
@@ -100,6 +120,12 @@ async function listUsers(req, res) {
 
     const where = {};
     if (req.query.organizationId) where.organizationId = req.query.organizationId;
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(400).json({ ok: false, message: 'organizationId is required for this user.' });
+      }
+    }
     if (req.query.status) where.status = req.query.status;
     if (req.query.role) where.role = req.query.role;
 
@@ -146,12 +172,30 @@ async function listUsers(req, res) {
 
 async function getUserById(req, res) {
   try {
-    const User = getUserModel();
-    if (!User) {
+    const models = getUserRoleModels();
+    if (!models) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { User, Role } = models;
 
-    const user = await User.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'User not found.' });
+      }
+    }
+
+    const user = await User.findOne({
+      where,
+      include: [
+        {
+          model: Role,
+          as: 'roles',
+          through: { attributes: ['id', 'assignedByUserId', 'createdAt'] },
+        },
+      ],
+    });
     if (!user) {
       return res.status(404).json({ ok: false, message: 'User not found.' });
     }
@@ -170,12 +214,22 @@ async function updateUser(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const user = await User.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'User not found.' });
+      }
+    }
+    const user = await User.findOne({ where });
     if (!user) {
       return res.status(404).json({ ok: false, message: 'User not found.' });
     }
 
     const payload = cleanUndefined(pickUserPayload(req.body));
+    if (!isPrivilegedRequest(req)) {
+      delete payload.organizationId;
+    }
     if (payload.email) {
       payload.email = String(payload.email).toLowerCase().trim();
     }
@@ -198,7 +252,14 @@ async function deleteUser(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const user = await User.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'User not found.' });
+      }
+    }
+    const user = await User.findOne({ where });
     if (!user) {
       return res.status(404).json({ ok: false, message: 'User not found.' });
     }
@@ -211,10 +272,142 @@ async function deleteUser(req, res) {
   }
 }
 
+async function listUserAssignableRoles(req, res) {
+  try {
+    const models = getUserRoleModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+    const { User, Role } = models;
+
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'User not found.' });
+      }
+    }
+    const user = await User.findOne({ where });
+    if (!user) {
+      return res.status(404).json({ ok: false, message: 'User not found.' });
+    }
+
+    const roles = await Role.findAll({
+      where: { isActive: true },
+      attributes: ['id', 'name', 'code', 'description'],
+      order: [['name', 'ASC']],
+    });
+
+    return res.status(200).json({
+      ok: true,
+      data: roles,
+      meta: { total: roles.length },
+    });
+  } catch (err) {
+    console.error('List assignable roles error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to fetch assignable roles.' });
+  }
+}
+
+async function addRoleToUser(req, res) {
+  try {
+    const models = getUserRoleModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+    const { User, Role, UserRole } = models;
+
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'User not found.' });
+      }
+    }
+    const user = await User.findOne({ where });
+    if (!user) {
+      return res.status(404).json({ ok: false, message: 'User not found.' });
+    }
+
+    const roleId = String(req.body?.roleId || '').trim();
+    if (!roleId) {
+      return res.status(400).json({ ok: false, message: 'roleId is required.' });
+    }
+
+    const role = await Role.findOne({ where: { id: roleId, isActive: true } });
+    if (!role) {
+      return res.status(404).json({ ok: false, message: 'Role not found or inactive.' });
+    }
+
+    const [membership] = await UserRole.findOrCreate({
+      where: { userId: user.id, roleId: role.id },
+      defaults: {
+        assignedByUserId: req.auth?.user?.id || null,
+      },
+    });
+
+    return res.status(201).json({
+      ok: true,
+      message: 'Role assigned to user successfully.',
+      data: membership,
+    });
+  } catch (err) {
+    console.error('Add role to user error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to assign role to user.' });
+  }
+}
+
+async function removeRoleFromUser(req, res) {
+  try {
+    const models = getUserRoleModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+    const { User, UserRole } = models;
+
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'User not found.' });
+      }
+    }
+    const user = await User.findOne({ where });
+    if (!user) {
+      return res.status(404).json({ ok: false, message: 'User not found.' });
+    }
+
+    const roleId = String(req.params.roleId || '').trim();
+    if (!roleId) {
+      return res.status(400).json({ ok: false, message: 'roleId is required.' });
+    }
+
+    const membership = await UserRole.findOne({
+      where: {
+        userId: user.id,
+        roleId,
+      },
+    });
+
+    if (!membership) {
+      return res.status(404).json({ ok: false, message: 'User role assignment not found.' });
+    }
+
+    await membership.destroy();
+    return res.status(200).json({ ok: true, message: 'Role removed from user successfully.' });
+  } catch (err) {
+    console.error('Remove role from user error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to remove role from user.' });
+  }
+}
+
 module.exports = {
   createUser,
   listUsers,
   getUserById,
   updateUser,
   deleteUser,
+  listUserAssignableRoles,
+  addRoleToUser,
+  removeRoleFromUser,
 };

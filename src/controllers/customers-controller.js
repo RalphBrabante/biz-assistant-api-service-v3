@@ -1,5 +1,10 @@
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
+const {
+  isPrivilegedRequest,
+  getAuthenticatedOrganizationId,
+  applyOrganizationWhereScope,
+} = require('../services/request-scope');
 
 function getCustomerModels() {
   const models = getModels();
@@ -68,6 +73,9 @@ async function createCustomer(req, res) {
     if (payload.email) {
       payload.email = String(payload.email).toLowerCase().trim();
     }
+    if (!isPrivilegedRequest(req)) {
+      payload.organizationId = getAuthenticatedOrganizationId(req);
+    }
 
     if (!payload.organizationId) {
       return res.status(400).json({ ok: false, message: 'organizationId is required.' });
@@ -102,6 +110,12 @@ async function listCustomers(req, res) {
     const where = {};
 
     if (req.query.organizationId) where.organizationId = req.query.organizationId;
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(400).json({ ok: false, message: 'organizationId is required for this user.' });
+      }
+    }
     if (req.query.type) where.type = req.query.type;
     if (req.query.status) where.status = req.query.status;
 
@@ -159,7 +173,16 @@ async function getCustomerById(req, res) {
     }
 
     const { Customer } = models;
-    const customer = await Customer.findByPk(req.params.id, {
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Customer not found.' });
+      }
+    }
+
+    const customer = await Customer.findOne({
+      where,
       include: [
         {
           association: 'organization',
@@ -187,7 +210,14 @@ async function updateCustomer(req, res) {
     }
 
     const { Customer } = models;
-    const customer = await Customer.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Customer not found.' });
+      }
+    }
+    const customer = await Customer.findOne({ where });
     if (!customer) {
       return res.status(404).json({ ok: false, message: 'Customer not found.' });
     }
@@ -198,6 +228,10 @@ async function updateCustomer(req, res) {
     }
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ ok: false, message: 'No valid fields provided for update.' });
+    }
+
+    if (!isPrivilegedRequest(req)) {
+      delete payload.organizationId;
     }
 
     await customer.update(payload);
@@ -227,7 +261,14 @@ async function deleteCustomer(req, res) {
     }
 
     const { Customer } = models;
-    const customer = await Customer.findByPk(req.params.id);
+    const where = { id: req.params.id };
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(404).json({ ok: false, message: 'Customer not found.' });
+      }
+    }
+    const customer = await Customer.findOne({ where });
     if (!customer) {
       return res.status(404).json({ ok: false, message: 'Customer not found.' });
     }

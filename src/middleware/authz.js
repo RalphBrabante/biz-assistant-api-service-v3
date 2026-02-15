@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
 
 function extractBearerToken(req) {
@@ -14,10 +15,15 @@ function hasPrivilegedRole(roleCodes) {
   return normalized.includes('superuser') || normalized.includes('administrator');
 }
 
+function hasSuperuserRole(roleCodes) {
+  const normalized = roleCodes.map((code) => String(code || '').toLowerCase());
+  return normalized.includes('superuser');
+}
+
 async function authenticateRequest(req, res, next) {
   try {
     const models = getModels();
-    if (!models || !models.Token || !models.User || !models.Role || !models.Permission) {
+    if (!models || !models.Token || !models.User || !models.Role || !models.Permission || !models.License) {
       return res.status(503).json({
         code: 'SERVICE_UNAVAILABLE',
         message: 'Authentication service is not ready.',
@@ -85,6 +91,38 @@ async function authenticateRequest(req, res, next) {
     }
 
     const roles = (user.roles || []).map((role) => role.code);
+    const isSuperuser = hasSuperuserRole(roles);
+
+    // Enforce organization license access for all non-superuser users.
+    if (!isSuperuser) {
+      const organizationId = user.organizationId;
+      if (!organizationId) {
+        return res.status(403).json({
+          code: 'LICENSE_INACTIVE',
+          message: 'Organization has no active license.',
+        });
+      }
+
+      const now = new Date();
+      const activeLicense = await models.License.findOne({
+        where: {
+          organizationId,
+          isActive: true,
+          status: 'active',
+          revokedAt: null,
+          expiresAt: { [Op.gte]: now },
+        },
+        order: [['expiresAt', 'DESC']],
+      });
+
+      if (!activeLicense) {
+        return res.status(403).json({
+          code: 'LICENSE_INACTIVE',
+          message: 'Organization license is missing, revoked, or expired.',
+        });
+      }
+    }
+
     const permissions = new Set();
     for (const role of user.roles || []) {
       for (const permission of role.permissions || []) {

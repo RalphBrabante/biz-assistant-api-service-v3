@@ -12,8 +12,8 @@ async function organizationHasActiveLicense(organizationId, now = new Date()) {
       organizationId,
       isActive: true,
       status: 'active',
-      startsAt: { [Op.lte]: now },
-      expiresAt: { [Op.gt]: now },
+      expiresAt: { [Op.gte]: now },
+      revokedAt: null,
     },
     order: [['expiresAt', 'DESC']],
   });

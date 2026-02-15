@@ -9,6 +9,18 @@ function getRoleModel() {
   return models.Role;
 }
 
+function getRolePermissionModels() {
+  const models = getModels();
+  if (!models || !models.Role || !models.Permission || !models.RolePermission) {
+    return null;
+  }
+  return {
+    Role: models.Role,
+    Permission: models.Permission,
+    RolePermission: models.RolePermission,
+  };
+}
+
 function pickRolePayload(body = {}) {
   return {
     name: body.name,
@@ -111,12 +123,21 @@ async function listRoles(req, res) {
 
 async function getRoleById(req, res) {
   try {
-    const Role = getRoleModel();
-    if (!Role) {
+    const models = getRolePermissionModels();
+    if (!models) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { Role, Permission } = models;
 
-    const role = await Role.findByPk(req.params.id);
+    const role = await Role.findByPk(req.params.id, {
+      include: [
+        {
+          model: Permission,
+          as: 'permissions',
+          through: { attributes: ['id', 'isAllowed', 'scope', 'isActive', 'createdAt'] },
+        },
+      ],
+    });
     if (!role) {
       return res.status(404).json({ ok: false, message: 'Role not found.' });
     }
@@ -176,10 +197,134 @@ async function deleteRole(req, res) {
   }
 }
 
+async function listRoleAssignablePermissions(req, res) {
+  try {
+    const models = getRolePermissionModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+    const { Role, Permission } = models;
+
+    const role = await Role.findByPk(req.params.id);
+    if (!role) {
+      return res.status(404).json({ ok: false, message: 'Role not found.' });
+    }
+
+    const permissions = await Permission.findAll({
+      where: { isActive: true },
+      attributes: ['id', 'name', 'code', 'resource', 'action', 'description', 'isActive'],
+      order: [['code', 'ASC']],
+    });
+
+    return res.status(200).json({
+      ok: true,
+      data: permissions,
+      meta: { total: permissions.length },
+    });
+  } catch (err) {
+    console.error('List role assignable permissions error:', err);
+    return res
+      .status(500)
+      .json({ ok: false, message: 'Unable to fetch assignable permissions.' });
+  }
+}
+
+async function addPermissionToRole(req, res) {
+  try {
+    const models = getRolePermissionModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+    const { Role, Permission, RolePermission } = models;
+
+    const role = await Role.findByPk(req.params.id);
+    if (!role) {
+      return res.status(404).json({ ok: false, message: 'Role not found.' });
+    }
+
+    const permissionId = String(req.body?.permissionId || '').trim();
+    if (!permissionId) {
+      return res.status(400).json({ ok: false, message: 'permissionId is required.' });
+    }
+
+    const permission = await Permission.findOne({ where: { id: permissionId, isActive: true } });
+    if (!permission) {
+      return res.status(404).json({ ok: false, message: 'Permission not found or inactive.' });
+    }
+
+    const [rolePermission] = await RolePermission.findOrCreate({
+      where: { roleId: role.id, permissionId: permission.id },
+      defaults: {
+        isAllowed: true,
+        isActive: true,
+        assignedByUserId: req.auth?.user?.id || null,
+      },
+    });
+
+    if (!rolePermission.isActive || rolePermission.isAllowed !== true) {
+      await rolePermission.update({
+        isActive: true,
+        isAllowed: true,
+      });
+    }
+
+    return res.status(201).json({
+      ok: true,
+      message: 'Permission added to role successfully.',
+      data: rolePermission,
+    });
+  } catch (err) {
+    console.error('Add permission to role error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to add permission to role.' });
+  }
+}
+
+async function removePermissionFromRole(req, res) {
+  try {
+    const models = getRolePermissionModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+    const { Role, RolePermission } = models;
+
+    const role = await Role.findByPk(req.params.id);
+    if (!role) {
+      return res.status(404).json({ ok: false, message: 'Role not found.' });
+    }
+
+    const permissionId = String(req.params.permissionId || '').trim();
+    if (!permissionId) {
+      return res.status(400).json({ ok: false, message: 'permissionId is required.' });
+    }
+
+    const rolePermission = await RolePermission.findOne({
+      where: {
+        roleId: role.id,
+        permissionId,
+      },
+    });
+
+    if (!rolePermission) {
+      return res.status(404).json({ ok: false, message: 'Role permission assignment not found.' });
+    }
+
+    await rolePermission.destroy();
+    return res
+      .status(200)
+      .json({ ok: true, message: 'Permission removed from role successfully.' });
+  } catch (err) {
+    console.error('Remove permission from role error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to remove permission from role.' });
+  }
+}
+
 module.exports = {
   createRole,
   listRoles,
   getRoleById,
   updateRole,
   deleteRole,
+  listRoleAssignablePermissions,
+  addPermissionToRole,
+  removePermissionFromRole,
 };

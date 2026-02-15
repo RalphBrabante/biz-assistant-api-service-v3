@@ -1,9 +1,10 @@
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
+const { isPrivilegedRequest } = require('../services/request-scope');
 
 function resolveOrganizationId(req, fallback = null) {
   const authOrgId = req.auth?.user?.organizationId || null;
-  if (req.auth?.isPrivileged) {
+  if (isPrivilegedRequest(req)) {
     return req.query.organizationId || fallback || authOrgId;
   }
   return authOrgId;
@@ -144,17 +145,20 @@ async function getVendorById(req, res, next) {
       return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
     }
 
-    const organizationId = resolveOrganizationId(req);
-    if (!organizationId) {
-      return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
+    const { Vendor, Organization } = models;
+    const where = {
+      id: req.params.id,
+    };
+    if (!isPrivilegedRequest(req)) {
+      const organizationId = resolveOrganizationId(req);
+      if (!organizationId) {
+        return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
+      }
+      where.organizationId = organizationId;
     }
 
-    const { Vendor, Organization } = models;
     const vendor = await Vendor.findOne({
-      where: {
-        id: req.params.id,
-        organizationId,
-      },
+      where,
       include: [
         {
           model: Organization,
@@ -182,17 +186,20 @@ async function updateVendor(req, res, next) {
       return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
     }
 
-    const organizationId = resolveOrganizationId(req);
-    if (!organizationId) {
-      return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
+    const { Vendor } = models;
+    const where = {
+      id: req.params.id,
+    };
+    if (!isPrivilegedRequest(req)) {
+      const organizationId = resolveOrganizationId(req);
+      if (!organizationId) {
+        return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
+      }
+      where.organizationId = organizationId;
     }
 
-    const { Vendor } = models;
     const vendor = await Vendor.findOne({
-      where: {
-        id: req.params.id,
-        organizationId,
-      },
+      where,
     });
 
     if (!vendor) {
@@ -222,17 +229,20 @@ async function deleteVendor(req, res, next) {
       return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
     }
 
-    const organizationId = resolveOrganizationId(req);
-    if (!organizationId) {
-      return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
+    const { Vendor } = models;
+    const where = {
+      id: req.params.id,
+    };
+    if (!isPrivilegedRequest(req)) {
+      const organizationId = resolveOrganizationId(req);
+      if (!organizationId) {
+        return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
+      }
+      where.organizationId = organizationId;
     }
 
-    const { Vendor } = models;
     const vendor = await Vendor.findOne({
-      where: {
-        id: req.params.id,
-        organizationId,
-      },
+      where,
     });
 
     if (!vendor) {

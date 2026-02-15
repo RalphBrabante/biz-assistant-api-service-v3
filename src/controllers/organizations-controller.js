@@ -1,5 +1,10 @@
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
+const {
+  isPrivilegedRequest,
+  getAuthenticatedOrganizationId,
+  assertOrganizationAccess,
+} = require('../services/request-scope');
 
 function getOrganizationModel() {
   const models = getModels();
@@ -117,6 +122,13 @@ async function listOrganizations(req, res) {
     const offset = (page - 1) * limit;
 
     const where = {};
+    if (!isPrivilegedRequest(req)) {
+      const organizationId = getAuthenticatedOrganizationId(req);
+      if (!organizationId) {
+        return res.status(400).json({ ok: false, message: 'organizationId is required for this user.' });
+      }
+      where.id = organizationId;
+    }
     const isActive = parseBoolean(req.query.isActive);
     if (isActive !== undefined) {
       where.isActive = isActive;
@@ -163,6 +175,10 @@ async function getOrganizationById(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
+    if (!assertOrganizationAccess(req, req.params.id)) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
+
     const organization = await Organization.findByPk(req.params.id);
     if (!organization) {
       return res.status(404).json({ ok: false, message: 'Organization not found.' });
@@ -183,6 +199,9 @@ async function listOrganizationUsers(req, res) {
     }
 
     const { Organization, User } = models;
+    if (!assertOrganizationAccess(req, req.params.id)) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
 
     const organization = await Organization.findByPk(req.params.id);
     if (!organization) {
@@ -215,6 +234,9 @@ async function searchAssignableUsers(req, res) {
     }
 
     const { Organization, User, OrganizationUser } = models;
+    if (!assertOrganizationAccess(req, req.params.id)) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
 
     const organization = await Organization.findByPk(req.params.id);
     if (!organization) {
@@ -270,6 +292,9 @@ async function listOrganizationAssignableRoles(req, res) {
     }
 
     const { Organization, Role } = models;
+    if (!assertOrganizationAccess(req, req.params.id)) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
     const organization = await Organization.findByPk(req.params.id);
     if (!organization) {
       return res.status(404).json({ ok: false, message: 'Organization not found.' });
@@ -300,6 +325,9 @@ async function addUserToOrganization(req, res) {
     }
 
     const { Organization, User, OrganizationUser, Role, UserRole } = models;
+    if (!assertOrganizationAccess(req, req.params.id)) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
 
     const organization = await Organization.findByPk(req.params.id);
     if (!organization) {
@@ -401,6 +429,9 @@ async function removeUserFromOrganization(req, res) {
     }
 
     const { Organization, User, OrganizationUser } = models;
+    if (!assertOrganizationAccess(req, req.params.id)) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
 
     const organization = await Organization.findByPk(req.params.id);
     if (!organization) {
@@ -437,6 +468,10 @@ async function updateOrganization(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
+    if (!assertOrganizationAccess(req, req.params.id)) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
+
     const organization = await Organization.findByPk(req.params.id);
     if (!organization) {
       return res.status(404).json({ ok: false, message: 'Organization not found.' });
@@ -463,6 +498,10 @@ async function deleteOrganization(req, res) {
     const Organization = getOrganizationModel();
     if (!Organization) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    if (!assertOrganizationAccess(req, req.params.id)) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
     }
 
     const organization = await Organization.findByPk(req.params.id);
