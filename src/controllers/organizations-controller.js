@@ -1,0 +1,487 @@
+const { Op } = require('sequelize');
+const { getModels } = require('../sequelize');
+
+function getOrganizationModel() {
+  const models = getModels();
+  if (!models || !models.Organization) {
+    return null;
+  }
+  return models.Organization;
+}
+
+function getOrganizationMembershipModels() {
+  const models = getModels();
+  if (!models || !models.Organization || !models.User || !models.OrganizationUser) {
+    return null;
+  }
+  return {
+    Organization: models.Organization,
+    User: models.User,
+    OrganizationUser: models.OrganizationUser,
+    Role: models.Role || null,
+    UserRole: models.UserRole || null,
+  };
+}
+
+function pickOrganizationPayload(body = {}) {
+  return {
+    name: body.name,
+    legalName: body.legalName,
+    taxId: body.taxId,
+    addressLine1: body.addressLine1,
+    addressLine2: body.addressLine2,
+    city: body.city,
+    state: body.state,
+    postalCode: body.postalCode,
+    country: body.country,
+    contactEmail: body.contactEmail,
+    phone: body.phone,
+    website: body.website,
+    contactName: body.contactName,
+    industry: body.industry,
+    employeeCount: body.employeeCount,
+    notes: body.notes,
+    isActive: body.isActive,
+  };
+}
+
+function cleanUndefined(payload) {
+  return Object.fromEntries(
+    Object.entries(payload).filter(([, value]) => value !== undefined)
+  );
+}
+
+function parseBoolean(value) {
+  if (value === true || value === 'true' || value === 1 || value === '1') {
+    return true;
+  }
+  if (value === false || value === 'false' || value === 0 || value === '0') {
+    return false;
+  }
+  return undefined;
+}
+
+function sanitizeUser(user) {
+  const json = user.toJSON ? user.toJSON() : user;
+  delete json.password;
+  return json;
+}
+
+async function createOrganization(req, res) {
+  try {
+    const Organization = getOrganizationModel();
+    if (!Organization) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    const payload = cleanUndefined(pickOrganizationPayload(req.body));
+
+    if (!payload.name) {
+      return res.status(400).json({ ok: false, message: 'name is required.' });
+    }
+    if (!payload.addressLine1) {
+      return res.status(400).json({ ok: false, message: 'addressLine1 is required.' });
+    }
+    if (!payload.city) {
+      return res.status(400).json({ ok: false, message: 'city is required.' });
+    }
+    if (!payload.country) {
+      payload.country = 'United States';
+    }
+    if (!payload.contactEmail) {
+      return res.status(400).json({ ok: false, message: 'contactEmail is required.' });
+    }
+    if (!payload.phone) {
+      return res.status(400).json({ ok: false, message: 'phone is required.' });
+    }
+
+    const organization = await Organization.create(payload);
+    return res.status(201).json({ ok: true, data: organization });
+  } catch (err) {
+    console.error('Create organization error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to create organization.' });
+  }
+}
+
+async function listOrganizations(req, res) {
+  try {
+    const Organization = getOrganizationModel();
+    if (!Organization) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+    const offset = (page - 1) * limit;
+
+    const where = {};
+    const isActive = parseBoolean(req.query.isActive);
+    if (isActive !== undefined) {
+      where.isActive = isActive;
+    }
+
+    if (req.query.q) {
+      where[Op.or] = [
+        { name: { [Op.like]: `%${req.query.q}%` } },
+        { legalName: { [Op.like]: `%${req.query.q}%` } },
+        { taxId: { [Op.like]: `%${req.query.q}%` } },
+        { contactEmail: { [Op.like]: `%${req.query.q}%` } },
+        { city: { [Op.like]: `%${req.query.q}%` } },
+        { state: { [Op.like]: `%${req.query.q}%` } },
+      ];
+    }
+
+    const { rows, count } = await Organization.findAndCountAll({
+      where,
+      limit,
+      offset,
+      order: [['createdAt', 'DESC']],
+    });
+
+    return res.status(200).json({
+      ok: true,
+      data: rows,
+      meta: {
+        page,
+        limit,
+        total: count,
+        totalPages: Math.ceil(count / limit),
+      },
+    });
+  } catch (err) {
+    console.error('List organizations error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to fetch organizations.' });
+  }
+}
+
+async function getOrganizationById(req, res) {
+  try {
+    const Organization = getOrganizationModel();
+    if (!Organization) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    const organization = await Organization.findByPk(req.params.id);
+    if (!organization) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
+
+    return res.status(200).json({ ok: true, data: organization });
+  } catch (err) {
+    console.error('Get organization error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to fetch organization.' });
+  }
+}
+
+async function listOrganizationUsers(req, res) {
+  try {
+    const models = getOrganizationMembershipModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    const { Organization, User } = models;
+
+    const organization = await Organization.findByPk(req.params.id);
+    if (!organization) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
+
+    const users = await organization.getUsers({
+      joinTableAttributes: ['id', 'role', 'isActive', 'createdAt', 'updatedAt'],
+      order: [['createdAt', 'DESC']],
+    });
+
+    return res.status(200).json({
+      ok: true,
+      data: users.map((user) => sanitizeUser(user)),
+      meta: {
+        total: users.length,
+      },
+    });
+  } catch (err) {
+    console.error('List organization users error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to fetch organization users.' });
+  }
+}
+
+async function searchAssignableUsers(req, res) {
+  try {
+    const models = getOrganizationMembershipModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    const { Organization, User, OrganizationUser } = models;
+
+    const organization = await Organization.findByPk(req.params.id);
+    if (!organization) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
+
+    const q = String(req.query.q || '').trim();
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+
+    const memberships = await OrganizationUser.findAll({
+      where: { organizationId: organization.id },
+      attributes: ['userId'],
+    });
+    const existingUserIds = memberships.map((row) => row.userId);
+
+    const where = {};
+    if (existingUserIds.length > 0) {
+      where.id = { [Op.notIn]: existingUserIds };
+    }
+
+    if (q) {
+      where[Op.or] = [
+        { firstName: { [Op.like]: `%${q}%` } },
+        { lastName: { [Op.like]: `%${q}%` } },
+        { email: { [Op.like]: `%${q}%` } },
+      ];
+    }
+
+    const users = await User.findAll({
+      where,
+      limit,
+      order: [['createdAt', 'DESC']],
+    });
+
+    return res.status(200).json({
+      ok: true,
+      data: users.map((user) => sanitizeUser(user)),
+      meta: {
+        total: users.length,
+      },
+    });
+  } catch (err) {
+    console.error('Search assignable users error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to search assignable users.' });
+  }
+}
+
+async function listOrganizationAssignableRoles(req, res) {
+  try {
+    const models = getOrganizationMembershipModels();
+    if (!models || !models.Role) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    const { Organization, Role } = models;
+    const organization = await Organization.findByPk(req.params.id);
+    if (!organization) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
+
+    const roles = await Role.findAll({
+      where: { isActive: true },
+      attributes: ['id', 'name', 'code', 'description'],
+      order: [['name', 'ASC']],
+    });
+
+    return res.status(200).json({
+      ok: true,
+      data: roles,
+      meta: { total: roles.length },
+    });
+  } catch (err) {
+    console.error('List organization assignable roles error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to fetch assignable roles.' });
+  }
+}
+
+async function addUserToOrganization(req, res) {
+  try {
+    const models = getOrganizationMembershipModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    const { Organization, User, OrganizationUser, Role, UserRole } = models;
+
+    const organization = await Organization.findByPk(req.params.id);
+    if (!organization) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
+
+    const userId = String(req.body?.userId || '').trim();
+    if (!userId) {
+      return res.status(400).json({ ok: false, message: 'userId is required.' });
+    }
+
+    const user = await User.findByPk(userId);
+    if (!user) {
+      return res.status(404).json({ ok: false, message: 'User not found.' });
+    }
+
+    const requestedRoleId = String(req.body?.roleId || '').trim();
+    const requestedRole = String(req.body?.role || 'member').trim() || 'member';
+    let resolvedRoleCode = requestedRole;
+    let resolvedRoleId = null;
+
+    if (requestedRoleId && Role) {
+      const roleRecord = await Role.findByPk(requestedRoleId);
+      if (!roleRecord) {
+        return res.status(404).json({ ok: false, message: 'Role not found.' });
+      }
+      resolvedRoleCode = String(roleRecord.code || requestedRole).trim() || 'member';
+      resolvedRoleId = roleRecord.id;
+    }
+
+    const isActive = req.body?.isActive === undefined ? true : Boolean(req.body.isActive);
+
+    const [membership, created] = await OrganizationUser.findOrCreate({
+      where: {
+        organizationId: organization.id,
+        userId,
+      },
+      defaults: {
+        organizationId: organization.id,
+        userId,
+        role: resolvedRoleCode,
+        isActive,
+      },
+    });
+
+    if (!created) {
+      await membership.update({ role: resolvedRoleCode, isActive });
+    }
+
+    if (resolvedRoleId && UserRole) {
+      const [userRole] = await UserRole.findOrCreate({
+        where: {
+          userId,
+          roleId: resolvedRoleId,
+        },
+        defaults: {
+          userId,
+          roleId: resolvedRoleId,
+          assignedByUserId: req.auth?.userId || null,
+          isActive: true,
+        },
+      });
+
+      if (!userRole.isActive) {
+        await userRole.update({
+          isActive: true,
+          assignedByUserId: req.auth?.userId || null,
+        });
+      }
+
+      if (user.role !== resolvedRoleCode) {
+        await user.update({ role: resolvedRoleCode });
+      }
+    }
+
+    return res.status(created ? 201 : 200).json({
+      ok: true,
+      message: created ? 'User added to organization.' : 'Organization membership updated.',
+      data: {
+        id: membership.id,
+        organizationId: membership.organizationId,
+        userId: membership.userId,
+        role: membership.role,
+        roleId: resolvedRoleId,
+        isActive: membership.isActive,
+      },
+    });
+  } catch (err) {
+    console.error('Add user to organization error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to add user to organization.' });
+  }
+}
+
+async function removeUserFromOrganization(req, res) {
+  try {
+    const models = getOrganizationMembershipModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    const { Organization, User, OrganizationUser } = models;
+
+    const organization = await Organization.findByPk(req.params.id);
+    if (!organization) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
+
+    const user = await User.findByPk(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ ok: false, message: 'User not found.' });
+    }
+
+    const deletedCount = await OrganizationUser.destroy({
+      where: {
+        organizationId: organization.id,
+        userId: user.id,
+      },
+    });
+
+    if (!deletedCount) {
+      return res.status(404).json({ ok: false, message: 'User is not a member of this organization.' });
+    }
+
+    return res.status(200).json({ ok: true, message: 'User removed from organization.' });
+  } catch (err) {
+    console.error('Remove user from organization error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to remove user from organization.' });
+  }
+}
+
+async function updateOrganization(req, res) {
+  try {
+    const Organization = getOrganizationModel();
+    if (!Organization) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    const organization = await Organization.findByPk(req.params.id);
+    if (!organization) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
+
+    const payload = cleanUndefined(pickOrganizationPayload(req.body));
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({ ok: false, message: 'No valid fields provided for update.' });
+    }
+
+    await organization.update(payload);
+    return res.status(200).json({ ok: true, data: organization });
+  } catch (err) {
+    console.error('Update organization error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to update organization.' });
+  }
+}
+
+async function deleteOrganization(req, res) {
+  try {
+    const Organization = getOrganizationModel();
+    if (!Organization) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    const organization = await Organization.findByPk(req.params.id);
+    if (!organization) {
+      return res.status(404).json({ ok: false, message: 'Organization not found.' });
+    }
+
+    await organization.destroy();
+    return res.status(200).json({ ok: true, message: 'Organization deleted successfully.' });
+  } catch (err) {
+    console.error('Delete organization error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to delete organization.' });
+  }
+}
+
+module.exports = {
+  createOrganization,
+  listOrganizations,
+  getOrganizationById,
+  listOrganizationUsers,
+  searchAssignableUsers,
+  listOrganizationAssignableRoles,
+  addUserToOrganization,
+  removeUserFromOrganization,
+  updateOrganization,
+  deleteOrganization,
+};
