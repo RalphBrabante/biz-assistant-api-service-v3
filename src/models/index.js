@@ -32,6 +32,14 @@ const {
   initOrderItemSnapshotModel,
   OrderItemSnapshot,
 } = require('./order-item-snapshot');
+const {
+  initQuarterlySalesReportModel,
+  QuarterlySalesReport,
+} = require('./quarterly-sales-report');
+const {
+  initQuarterlyExpenseReportModel,
+  QuarterlyExpenseReport,
+} = require('./quarterly-expense-report');
 
 function initModels(sequelize) {
   initOrganizationModel(sequelize);
@@ -53,6 +61,8 @@ function initModels(sequelize) {
   initCustomerModel(sequelize);
   initWithholdingTaxTypeModel(sequelize);
   initOrderItemSnapshotModel(sequelize);
+  initQuarterlySalesReportModel(sequelize);
+  initQuarterlyExpenseReportModel(sequelize);
 
   Organization.hasMany(User, {
     foreignKey: {
@@ -948,6 +958,86 @@ function initModels(sequelize) {
     as: 'updater',
   });
 
+  Organization.hasMany(QuarterlySalesReport, {
+    foreignKey: {
+      name: 'organizationId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'quarterlySalesReports',
+  });
+
+  QuarterlySalesReport.belongsTo(Organization, {
+    foreignKey: {
+      name: 'organizationId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'organization',
+  });
+
+  User.hasMany(QuarterlySalesReport, {
+    foreignKey: {
+      name: 'generatedBy',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'generatedQuarterlySalesReports',
+  });
+
+  QuarterlySalesReport.belongsTo(User, {
+    foreignKey: {
+      name: 'generatedBy',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'generatedByUser',
+  });
+
+  Organization.hasMany(QuarterlyExpenseReport, {
+    foreignKey: {
+      name: 'organizationId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'quarterlyExpenseReports',
+  });
+
+  QuarterlyExpenseReport.belongsTo(Organization, {
+    foreignKey: {
+      name: 'organizationId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'organization',
+  });
+
+  User.hasMany(QuarterlyExpenseReport, {
+    foreignKey: {
+      name: 'generatedBy',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'generatedQuarterlyExpenseReports',
+  });
+
+  QuarterlyExpenseReport.belongsTo(User, {
+    foreignKey: {
+      name: 'generatedBy',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'generatedByUser',
+  });
+
   return {
     Organization,
     User,
@@ -968,6 +1058,8 @@ function initModels(sequelize) {
     Customer,
     WithholdingTaxType,
     OrderItemSnapshot,
+    QuarterlySalesReport,
+    QuarterlyExpenseReport,
   };
 }
 

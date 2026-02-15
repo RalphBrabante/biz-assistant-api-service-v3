@@ -47,6 +47,11 @@ function initOrganizationModel(sequelize) {
         allowNull: false,
         defaultValue: 'United States',
       },
+      currency: {
+        type: DataTypes.STRING(3),
+        allowNull: false,
+        defaultValue: 'USD',
+      },
       contactEmail: {
         type: DataTypes.STRING(255),
         allowNull: false,

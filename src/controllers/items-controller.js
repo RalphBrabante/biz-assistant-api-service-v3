@@ -1,5 +1,6 @@
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
+const { getOrganizationCurrency } = require('../services/organization-currency');
 
 function getItemModels() {
   const models = getModels();
@@ -65,6 +66,7 @@ async function createItem(req, res) {
     if (!payload.name) {
       return res.status(400).json({ ok: false, message: 'name is required.' });
     }
+    payload.currency = await getOrganizationCurrency(payload.organizationId);
 
     const item = await Item.create(payload);
     const created = await Item.findByPk(item.id, {
@@ -190,6 +192,8 @@ async function updateItem(req, res) {
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ ok: false, message: 'No valid fields provided for update.' });
     }
+    const effectiveOrganizationId = payload.organizationId || item.organizationId;
+    payload.currency = await getOrganizationCurrency(effectiveOrganizationId);
 
     await item.update(payload);
     const updated = await Item.findByPk(item.id, {

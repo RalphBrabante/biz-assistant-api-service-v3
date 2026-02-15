@@ -1,5 +1,6 @@
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
+const { getOrganizationCurrency } = require('../services/organization-currency');
 
 function getSalesInvoiceModel() {
   const models = getModels();
@@ -57,6 +58,7 @@ async function createSalesInvoice(req, res) {
     if (!payload.issueDate) {
       return res.status(400).json({ ok: false, message: 'issueDate is required.' });
     }
+    payload.currency = await getOrganizationCurrency(payload.organizationId);
 
     const salesInvoice = await SalesInvoice.create(payload);
     return res.status(201).json({ ok: true, data: salesInvoice });

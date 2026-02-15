@@ -34,6 +34,7 @@ function pickOrganizationPayload(body = {}) {
     state: body.state,
     postalCode: body.postalCode,
     country: body.country,
+    currency: body.currency,
     contactEmail: body.contactEmail,
     phone: body.phone,
     website: body.website,
@@ -88,6 +89,7 @@ async function createOrganization(req, res) {
     if (!payload.country) {
       payload.country = 'United States';
     }
+    payload.currency = String(payload.currency || 'USD').toUpperCase().slice(0, 3) || 'USD';
     if (!payload.contactEmail) {
       return res.status(400).json({ ok: false, message: 'contactEmail is required.' });
     }
@@ -443,6 +445,9 @@ async function updateOrganization(req, res) {
     const payload = cleanUndefined(pickOrganizationPayload(req.body));
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ ok: false, message: 'No valid fields provided for update.' });
+    }
+    if (payload.currency !== undefined) {
+      payload.currency = String(payload.currency || 'USD').toUpperCase().slice(0, 3) || 'USD';
     }
 
     await organization.update(payload);

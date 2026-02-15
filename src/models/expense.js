@@ -24,7 +24,12 @@ function initExpenseModel(sequelize) {
       },
       expenseNumber: {
         type: DataTypes.STRING(100),
+        allowNull: true,
+      },
+      vatExemptAmount: {
+        type: DataTypes.DECIMAL(12, 2),
         allowNull: false,
+        defaultValue: 0.0,
       },
       category: {
         type: DataTypes.STRING(120),

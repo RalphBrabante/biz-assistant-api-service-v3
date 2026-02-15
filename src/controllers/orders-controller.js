@@ -1,5 +1,6 @@
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
+const { getOrganizationCurrency } = require('../services/organization-currency');
 
 function getOrderModel() {
   const models = getModels();
@@ -181,6 +182,7 @@ async function createOrder(req, res) {
     if (orderedItems.length === 0) {
       return res.status(400).json({ ok: false, message: 'orderedItems is required and must not be empty.' });
     }
+    payload.currency = await getOrganizationCurrency(payload.organizationId);
 
     const itemIds = orderedItems.map((entry) => entry.itemId).filter(Boolean);
     if (itemIds.length !== orderedItems.length) {
@@ -572,7 +574,7 @@ async function updateOrder(req, res) {
             dueDate: order.dueDate || null,
             status: 'issued',
             paymentStatus: order.paymentStatus || 'unpaid',
-            currency: order.currency || 'USD',
+            currency: await getOrganizationCurrency(order.organizationId, order.currency || 'USD'),
             subtotalAmount: order.subtotalAmount || 0,
             taxAmount: order.taxAmount || 0,
             discountAmount: order.discountAmount || 0,

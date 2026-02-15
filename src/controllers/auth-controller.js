@@ -117,6 +117,14 @@ async function login(req, res) {
       lastLoginAt: new Date(),
     });
 
+    let organizationCurrency = 'USD';
+    if (user.organizationId && models.Organization) {
+      const organization = await models.Organization.findByPk(user.organizationId, {
+        attributes: ['id', 'currency'],
+      });
+      organizationCurrency = String(organization?.currency || 'USD').toUpperCase().slice(0, 3) || 'USD';
+    }
+
     return res.status(200).json({
       ok: true,
       message: 'Login successful.',
@@ -132,6 +140,7 @@ async function login(req, res) {
           status: user.status,
           isEmailVerified: user.isEmailVerified,
           organizationId: user.organizationId,
+          currency: organizationCurrency,
         },
       },
     });
