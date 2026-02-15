@@ -40,6 +40,7 @@ const {
   initQuarterlyExpenseReportModel,
   QuarterlyExpenseReport,
 } = require('./quarterly-expense-report');
+const { initAppSettingModel, AppSetting } = require('./app-setting');
 
 function initModels(sequelize) {
   initOrganizationModel(sequelize);
@@ -63,6 +64,7 @@ function initModels(sequelize) {
   initOrderItemSnapshotModel(sequelize);
   initQuarterlySalesReportModel(sequelize);
   initQuarterlyExpenseReportModel(sequelize);
+  initAppSettingModel(sequelize);
 
   Organization.hasMany(User, {
     foreignKey: {
@@ -1038,6 +1040,26 @@ function initModels(sequelize) {
     as: 'generatedByUser',
   });
 
+  User.hasMany(AppSetting, {
+    foreignKey: {
+      name: 'updatedBy',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'updatedAppSettings',
+  });
+
+  AppSetting.belongsTo(User, {
+    foreignKey: {
+      name: 'updatedBy',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'updatedByUser',
+  });
+
   return {
     Organization,
     User,
@@ -1060,6 +1082,7 @@ function initModels(sequelize) {
     OrderItemSnapshot,
     QuarterlySalesReport,
     QuarterlyExpenseReport,
+    AppSetting,
   };
 }
 

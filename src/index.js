@@ -16,8 +16,17 @@ const customersRoutes = require('./routes/customers-routes');
 const expensesRoutes = require('./routes/expenses-routes');
 const vendorsRoutes = require('./routes/vendors-routes');
 const reportsRoutes = require('./routes/reports-routes');
+const settingsRoutes = require('./routes/settings-routes');
 const devRoutes = require('./routes/dev-routes');
 const { authenticateRequest } = require('./middleware/authz');
+const {
+  readCacheMiddleware,
+  invalidateCacheOnWriteMiddleware,
+} = require('./middleware/cache');
+const {
+  setRedisClient,
+  initializeCacheConfig,
+} = require('./services/cache-service');
 const {
   errorResponseShapeMiddleware,
   notFoundHandler,
@@ -69,6 +78,7 @@ async function connectMysqlWithRetry(maxAttempts = 10, delayMs = 3000) {
 async function connectRedis() {
   redisClient = new Redis(process.env.REDIS_URL || 'redis://redis:6379');
   await redisClient.ping();
+  setRedisClient(redisClient);
   status.redis = true;
 }
 
@@ -82,6 +92,8 @@ async function connectAmqp() {
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/dev', devRoutes);
 app.use('/api/v1', authenticateRequest);
+app.use('/api/v1', readCacheMiddleware);
+app.use('/api/v1', invalidateCacheOnWriteMiddleware);
 app.use('/api/v1/items', itemsRoutes);
 app.use('/api/v1/organizations', organizationsRoutes);
 app.use('/api/v1/orders', ordersRoutes);
@@ -94,6 +106,7 @@ app.use('/api/v1/customers', customersRoutes);
 app.use('/api/v1/expenses', expensesRoutes);
 app.use('/api/v1/vendors', vendorsRoutes);
 app.use('/api/v1/reports', reportsRoutes);
+app.use('/api/v1/settings', settingsRoutes);
 app.use('/api/v1', systemRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);
@@ -101,6 +114,7 @@ app.use(errorHandler);
 async function bootstrap() {
   try {
     await connectMysqlWithRetry();
+    await initializeCacheConfig();
     console.log('MySQL connected');
   } catch (err) {
     console.error('MySQL connection failed after retries:', err.message);
@@ -112,6 +126,7 @@ async function bootstrap() {
     console.log('Redis connected');
   } catch (err) {
     console.error('Redis connection failed:', err.message);
+    setRedisClient(null);
   }
 
   try {
