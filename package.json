@@ -17,6 +17,7 @@
     "ioredis": "^5.4.1",
     "multer": "^1.4.5-lts.1",
     "mysql2": "^3.11.0",
+    "nodemailer": "^8.0.1",
     "sequelize": "^6.37.3",
     "sequelize-cli": "^6.6.2"
   },
