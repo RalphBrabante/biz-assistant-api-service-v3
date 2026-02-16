@@ -168,6 +168,7 @@ async function login(req, res) {
           email: user.email,
           firstName: user.firstName,
           lastName: user.lastName,
+          profileImageUrl: user.profileImageUrl,
           status: user.status,
           isEmailVerified: user.isEmailVerified,
           organizationId: user.organizationId,

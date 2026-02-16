@@ -34,6 +34,10 @@ const {
   OrderItemSnapshot,
 } = require('./order-item-snapshot');
 const {
+  initOrderActivityModel,
+  OrderActivity,
+} = require('./order-activity');
+const {
   initQuarterlySalesReportModel,
   QuarterlySalesReport,
 } = require('./quarterly-sales-report');
@@ -64,6 +68,7 @@ function initModels(sequelize) {
   initWithholdingTaxTypeModel(sequelize);
   initTaxTypeModel(sequelize);
   initOrderItemSnapshotModel(sequelize);
+  initOrderActivityModel(sequelize);
   initQuarterlySalesReportModel(sequelize);
   initQuarterlyExpenseReportModel(sequelize);
   initAppSettingModel(sequelize);
@@ -682,6 +687,66 @@ function initModels(sequelize) {
     as: 'item',
   });
 
+  Order.hasMany(OrderActivity, {
+    foreignKey: {
+      name: 'orderId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'activities',
+  });
+
+  OrderActivity.belongsTo(Order, {
+    foreignKey: {
+      name: 'orderId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'order',
+  });
+
+  Organization.hasMany(OrderActivity, {
+    foreignKey: {
+      name: 'organizationId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'orderActivities',
+  });
+
+  OrderActivity.belongsTo(Organization, {
+    foreignKey: {
+      name: 'organizationId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'organization',
+  });
+
+  User.hasMany(OrderActivity, {
+    foreignKey: {
+      name: 'userId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'orderActivities',
+  });
+
+  OrderActivity.belongsTo(User, {
+    foreignKey: {
+      name: 'userId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'actor',
+  });
+
   Organization.hasMany(SalesInvoice, {
     foreignKey: {
       name: 'organizationId',
@@ -1163,6 +1228,7 @@ function initModels(sequelize) {
     WithholdingTaxType,
     TaxType,
     OrderItemSnapshot,
+    OrderActivity,
     QuarterlySalesReport,
     QuarterlyExpenseReport,
     AppSetting,

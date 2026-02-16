@@ -32,6 +32,7 @@ function pickUserPayload(body = {}) {
     firstName: body.firstName,
     lastName: body.lastName,
     email: body.email,
+    profileImageUrl: body.profileImageUrl,
     password: body.password,
     phone: body.phone,
     addressLine1: body.addressLine1,

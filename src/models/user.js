@@ -31,6 +31,10 @@ function initUserModel(sequelize) {
           isEmail: true,
         },
       },
+      profileImageUrl: {
+        type: DataTypes.STRING(500),
+        allowNull: true,
+      },
       password: {
         type: DataTypes.STRING(255),
         allowNull: false,

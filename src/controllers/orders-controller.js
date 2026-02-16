@@ -224,14 +224,72 @@ function isStockValidationError(err) {
   );
 }
 
+function pushActivityEvent(events, event) {
+  if (!event || !event.actionType || !event.title) {
+    return;
+  }
+  events.push({
+    actionType: String(event.actionType),
+    title: String(event.title),
+    description: event.description ? String(event.description) : null,
+    changedFields: Array.isArray(event.changedFields) ? event.changedFields : null,
+    metadata: event.metadata || null,
+  });
+}
+
+async function persistOrderActivities({
+  OrderActivity,
+  orderId,
+  organizationId,
+  actorUserId,
+  events,
+  transaction,
+}) {
+  if (!OrderActivity || !orderId || !organizationId || !Array.isArray(events) || events.length === 0) {
+    return;
+  }
+
+  await OrderActivity.bulkCreate(
+    events.map((event) => ({
+      orderId,
+      organizationId,
+      userId: actorUserId || null,
+      actionType: event.actionType,
+      title: event.title,
+      description: event.description || null,
+      changedFields: event.changedFields || null,
+      metadata: event.metadata || null,
+    })),
+    { transaction }
+  );
+}
+
 async function createOrder(req, res) {
   try {
     const models = getModels();
-    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Item || !models.Customer || !models.Organization || !models.WithholdingTaxType) {
+    if (
+      !models ||
+      !models.Order ||
+      !models.OrderItemSnapshot ||
+      !models.OrderActivity ||
+      !models.Item ||
+      !models.Customer ||
+      !models.Organization ||
+      !models.WithholdingTaxType
+    ) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const { Order, OrderItemSnapshot, Item, Customer, Organization, WithholdingTaxType } = models;
+    const {
+      Order,
+      OrderItemSnapshot,
+      OrderActivity,
+      Item,
+      Customer,
+      Organization,
+      WithholdingTaxType,
+      User,
+    } = models;
     const payload = cleanUndefined(pickOrderPayload(req.body));
     delete payload.withHoldingTaxAmount;
     const orderedItems = Array.isArray(req.body.orderedItems)
@@ -371,6 +429,40 @@ async function createOrder(req, res) {
         await applyStockDeduction(itemById, stockDemand, transaction);
       }
 
+      const createEvents = [];
+      pushActivityEvent(createEvents, {
+        actionType: 'order_created',
+        title: 'Order created',
+        description: `Order ${order.orderNumber} was created.`,
+        changedFields: ['orderNumber', 'status', 'customerId', 'totalAmount'],
+        metadata: {
+          status: order.status,
+          paymentStatus: order.paymentStatus,
+          fulfillmentStatus: order.fulfillmentStatus,
+          itemCount: snapshotRows.length,
+          customerId: order.customerId,
+        },
+      });
+      if (payload.status === 'confirmed') {
+        pushActivityEvent(createEvents, {
+          actionType: 'order_confirmed',
+          title: 'Order confirmed',
+          description: 'Order was created in confirmed status and stock was deducted.',
+          changedFields: ['status'],
+          metadata: {
+            deductedProductCount: stockDemand.size,
+          },
+        });
+      }
+      await persistOrderActivities({
+        OrderActivity,
+        orderId: order.id,
+        organizationId: order.organizationId,
+        actorUserId: authUserId,
+        events: createEvents,
+        transaction,
+      });
+
       await transaction.commit();
 
       const createdOrder = await Order.findByPk(order.id, {
@@ -389,6 +481,20 @@ async function createOrder(req, res) {
             as: 'withholdingTaxType',
             attributes: ['id', 'code', 'name', 'percentage', 'appliesTo'],
             required: false,
+          },
+          {
+            model: OrderActivity,
+            as: 'activities',
+            separate: true,
+            order: [['createdAt', 'DESC']],
+            include: [
+              {
+                model: User,
+                as: 'actor',
+                attributes: ['id', 'firstName', 'lastName', 'email'],
+                required: false,
+              },
+            ],
           },
         ],
       });
@@ -488,10 +594,17 @@ async function listOrders(req, res) {
 async function getOrderById(req, res) {
   try {
     const models = getModels();
-    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Customer || !models.WithholdingTaxType) {
+    if (
+      !models ||
+      !models.Order ||
+      !models.OrderItemSnapshot ||
+      !models.OrderActivity ||
+      !models.Customer ||
+      !models.WithholdingTaxType
+    ) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { Order, OrderItemSnapshot, Customer, WithholdingTaxType } = models;
+    const { Order, OrderItemSnapshot, OrderActivity, Customer, WithholdingTaxType, User } = models;
 
     const where = { id: req.params.id };
     if (!isPrivilegedRequest(req)) {
@@ -519,6 +632,20 @@ async function getOrderById(req, res) {
           attributes: ['id', 'code', 'name', 'percentage', 'appliesTo'],
           required: false,
         },
+        {
+          model: OrderActivity,
+          as: 'activities',
+          separate: true,
+          order: [['createdAt', 'DESC']],
+          include: [
+            {
+              model: User,
+              as: 'actor',
+              attributes: ['id', 'firstName', 'lastName', 'email'],
+              required: false,
+            },
+          ],
+        },
       ],
     });
     if (!order) {
@@ -540,6 +667,7 @@ async function updateOrder(req, res) {
       !models.Order ||
       !models.Customer ||
       !models.OrderItemSnapshot ||
+      !models.OrderActivity ||
       !models.Item ||
       !models.SalesInvoice ||
       !models.Organization ||
@@ -547,7 +675,17 @@ async function updateOrder(req, res) {
     ) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { Order, Customer, OrderItemSnapshot, Item, SalesInvoice, Organization, WithholdingTaxType } = models;
+    const {
+      Order,
+      Customer,
+      OrderItemSnapshot,
+      OrderActivity,
+      Item,
+      SalesInvoice,
+      Organization,
+      WithholdingTaxType,
+      User,
+    } = models;
 
     const where = { id: req.params.id };
     if (!isPrivilegedRequest(req)) {
@@ -599,6 +737,15 @@ async function updateOrder(req, res) {
     }
 
     const authUser = req.auth?.user || null;
+    const beforeState = {
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      fulfillmentStatus: order.fulfillmentStatus,
+      customerId: order.customerId,
+      shippingAmount: Number(order.shippingAmount || 0),
+      totalAmount: Number(order.totalAmount || 0),
+      withholdingTaxTypeId: order.withholdingTaxTypeId || null,
+    };
     const hasFieldUpdates = Object.keys(payload).length > 0;
     const hasOrderedItemsUpdate = orderedItems !== null;
     const nextStatus = payload.status !== undefined ? payload.status : order.status;
@@ -640,6 +787,8 @@ async function updateOrder(req, res) {
 
     const transaction = await Order.sequelize.transaction();
     try {
+      const activityEvents = [];
+
       if (hasFieldUpdates) {
         await order.update(payload, { transaction });
       }
@@ -923,7 +1072,77 @@ async function updateOrder(req, res) {
           },
           { transaction }
         );
+
+        pushActivityEvent(activityEvents, {
+          actionType: 'sales_invoice_created',
+          title: 'Sales invoice created',
+          description: `Sales invoice ${salesInvoiceId} was generated on order completion.`,
+          changedFields: ['status'],
+          metadata: {
+            salesInvoiceId,
+            issueDate: salesInvoiceIssueDate,
+          },
+        });
       }
+
+      const changedFields = [];
+      if (beforeState.status !== order.status) changedFields.push('status');
+      if (beforeState.paymentStatus !== order.paymentStatus) changedFields.push('paymentStatus');
+      if (beforeState.fulfillmentStatus !== order.fulfillmentStatus) changedFields.push('fulfillmentStatus');
+      if (beforeState.customerId !== order.customerId) changedFields.push('customerId');
+      if (beforeState.shippingAmount !== Number(order.shippingAmount || 0)) changedFields.push('shippingAmount');
+      if (beforeState.withholdingTaxTypeId !== (order.withholdingTaxTypeId || null)) changedFields.push('withholdingTaxTypeId');
+      if (beforeState.totalAmount !== Number(order.totalAmount || 0)) changedFields.push('totalAmount');
+      if (hasOrderedItemsUpdate) changedFields.push('orderedItems');
+
+      if (changedFields.length > 0) {
+        pushActivityEvent(activityEvents, {
+          actionType: 'order_updated',
+          title: 'Order updated',
+          description: `Updated fields: ${changedFields.join(', ')}.`,
+          changedFields,
+          metadata: {
+            fromStatus: beforeState.status,
+            toStatus: order.status,
+            fromTotal: beforeState.totalAmount,
+            toTotal: Number(order.totalAmount || 0),
+          },
+        });
+      }
+
+      if (beforeState.status !== order.status) {
+        pushActivityEvent(activityEvents, {
+          actionType: 'status_changed',
+          title: 'Order status changed',
+          description: `Status changed from ${beforeState.status} to ${order.status}.`,
+          changedFields: ['status'],
+          metadata: {
+            from: beforeState.status,
+            to: order.status,
+          },
+        });
+      }
+
+      if (shouldApplyStockOnConfirm) {
+        pushActivityEvent(activityEvents, {
+          actionType: 'inventory_deducted',
+          title: 'Inventory adjusted',
+          description: 'Stock quantities were deducted when the order was confirmed.',
+          changedFields: ['status'],
+          metadata: {
+            triggerStatus: order.status,
+          },
+        });
+      }
+
+      await persistOrderActivities({
+        OrderActivity,
+        orderId: order.id,
+        organizationId: order.organizationId,
+        actorUserId: authUser?.id || order.updatedBy || order.userId || null,
+        events: activityEvents,
+        transaction,
+      });
 
       await transaction.commit();
 
@@ -943,6 +1162,20 @@ async function updateOrder(req, res) {
             as: 'withholdingTaxType',
             attributes: ['id', 'code', 'name', 'percentage', 'appliesTo'],
             required: false,
+          },
+          {
+            model: OrderActivity,
+            as: 'activities',
+            separate: true,
+            order: [['createdAt', 'DESC']],
+            include: [
+              {
+                model: User,
+                as: 'actor',
+                attributes: ['id', 'firstName', 'lastName', 'email'],
+                required: false,
+              },
+            ],
           },
         ],
       });

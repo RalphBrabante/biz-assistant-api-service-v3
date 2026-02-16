@@ -20,6 +20,7 @@ const reportsRoutes = require('./routes/reports-routes');
 const settingsRoutes = require('./routes/settings-routes');
 const taxTypesRoutes = require('./routes/tax-types-routes');
 const withholdingTaxTypesRoutes = require('./routes/withholding-tax-types-routes');
+const profileRoutes = require('./routes/profile-routes');
 const devRoutes = require('./routes/dev-routes');
 const { authenticateRequest } = require('./middleware/authz');
 const {
@@ -119,6 +120,7 @@ app.use('/api/v1/reports', reportsRoutes);
 app.use('/api/v1/settings', settingsRoutes);
 app.use('/api/v1/tax-types', taxTypesRoutes);
 app.use('/api/v1/withholding-tax-types', withholdingTaxTypesRoutes);
+app.use('/api/v1/profile', profileRoutes);
 app.use('/api/v1', systemRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);

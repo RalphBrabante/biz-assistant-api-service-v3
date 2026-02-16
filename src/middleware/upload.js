@@ -3,7 +3,9 @@ const path = require('path');
 const multer = require('multer');
 
 const expenseUploadDir = path.join(process.cwd(), 'uploads', 'expenses');
+const profileUploadDir = path.join(process.cwd(), 'uploads', 'profiles');
 fs.mkdirSync(expenseUploadDir, { recursive: true });
+fs.mkdirSync(profileUploadDir, { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => {
@@ -36,6 +38,29 @@ const upload = multer({
 
 const uploadExpenseImage = upload.single('file');
 
+const profileStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    fs.mkdirSync(profileUploadDir, { recursive: true });
+    cb(null, profileUploadDir);
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    const safeExt = ext || '.jpg';
+    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    cb(null, `profile-${unique}${safeExt}`);
+  },
+});
+
+const profileUpload = multer({
+  storage: profileStorage,
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+  },
+  fileFilter: imageOnlyFilter,
+});
+
+const uploadProfileImage = profileUpload.single('profileImage');
+
 function csvOnlyFilter(_req, file, cb) {
   const name = String(file?.originalname || '').toLowerCase();
   const mime = String(file?.mimetype || '').toLowerCase();
@@ -64,5 +89,6 @@ const uploadImportCsv = importUpload.single('file');
 
 module.exports = {
   uploadExpenseImage,
+  uploadProfileImage,
   uploadImportCsv,
 };
