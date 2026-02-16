@@ -28,6 +28,11 @@ function initTaxTypeModel(sequelize) {
         allowNull: false,
         defaultValue: 0.0,
       },
+      isSystem: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
       isActive: {
         type: DataTypes.BOOLEAN,
         allowNull: false,
@@ -43,6 +48,7 @@ function initTaxTypeModel(sequelize) {
       indexes: [
         { unique: true, fields: ['code'] },
         { fields: ['name'] },
+        { fields: ['is_system'] },
         { fields: ['is_active'] },
       ],
     }

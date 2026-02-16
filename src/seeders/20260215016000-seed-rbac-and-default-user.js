@@ -1,5 +1,4 @@
 'use strict';
-const bcrypt = require('bcryptjs');
 
 /** @type {import('sequelize-cli').Seeder} */
 module.exports = {
@@ -8,10 +7,6 @@ module.exports = {
 
     try {
       const now = new Date();
-      const defaultOrgId = '99999999-9999-4999-8999-999999999999';
-      const defaultUserId = '9a8b7c6d-5e4f-4321-8abc-1234567890ab';
-      const defaultEmail = 'ralphjohnbrabante@gmail.com';
-      const hashedDefaultPassword = await bcrypt.hash('Default123!', 10);
 
       const roles = [
         {
@@ -205,60 +200,6 @@ module.exports = {
         ],
       };
 
-      const [orgRows] = await queryInterface.sequelize.query(
-        'SELECT id FROM organizations ORDER BY created_at ASC LIMIT 1',
-        { transaction }
-      );
-
-      let organizationId = orgRows[0] ? orgRows[0].id : null;
-
-      if (!organizationId) {
-        organizationId = defaultOrgId;
-        await queryInterface.sequelize.query(
-          `
-          INSERT INTO organizations (
-            id, name, legal_name, tax_id, address_line1, city, state, postal_code, country,
-            contact_email, phone, website, contact_name, industry, employee_count, notes,
-            is_active, created_at, updated_at
-          )
-          VALUES (
-            :id, :name, :legalName, :taxId, :addressLine1, :city, :state, :postalCode, :country,
-            :contactEmail, :phone, NULL, :contactName, :industry, :employeeCount, :notes,
-            true, :createdAt, :updatedAt
-          )
-          ON DUPLICATE KEY UPDATE
-            name = VALUES(name),
-            legal_name = VALUES(legal_name),
-            tax_id = VALUES(tax_id),
-            contact_email = VALUES(contact_email),
-            phone = VALUES(phone),
-            updated_at = VALUES(updated_at)
-        `,
-          {
-            replacements: {
-              id: organizationId,
-              name: 'Default Workspace Organization',
-              legalName: 'Default Workspace Organization LLC',
-              taxId: '99-9999999',
-              addressLine1: '100 Workspace Drive',
-              city: 'San Francisco',
-              state: 'CA',
-              postalCode: '94105',
-              country: 'United States',
-              contactEmail: defaultEmail,
-              phone: '+1-415-555-0001',
-              contactName: 'Ralph Brabante',
-              industry: 'Software',
-              employeeCount: 1,
-              notes: 'Auto-created fallback organization for seed user.',
-              createdAt: now,
-              updatedAt: now,
-            },
-            transaction,
-          }
-        );
-      }
-
       for (const role of roles) {
         await queryInterface.sequelize.query(
           `
@@ -379,111 +320,6 @@ module.exports = {
         }
       }
 
-      await queryInterface.sequelize.query(
-        `
-        INSERT INTO users (
-          id, organization_id, first_name, last_name, email, password,
-          phone, address_line1, address_line2, city, state, postal_code, country,
-          role, status, is_email_verified, email_verified_at, is_active, last_login_at,
-          created_at, updated_at
-        )
-        VALUES (
-          :id, :organizationId, :firstName, :lastName, :email, :password,
-          :phone, :addressLine1, NULL, :city, :state, :postalCode, :country,
-          :role, :status, true, :emailVerifiedAt, true, NULL,
-          :createdAt, :updatedAt
-        )
-        ON DUPLICATE KEY UPDATE
-          organization_id = VALUES(organization_id),
-          first_name = VALUES(first_name),
-          last_name = VALUES(last_name),
-          password = VALUES(password),
-          phone = VALUES(phone),
-          address_line1 = VALUES(address_line1),
-          city = VALUES(city),
-          state = VALUES(state),
-          postal_code = VALUES(postal_code),
-          country = VALUES(country),
-          role = VALUES(role),
-          status = VALUES(status),
-          is_email_verified = VALUES(is_email_verified),
-          email_verified_at = VALUES(email_verified_at),
-          is_active = VALUES(is_active),
-          updated_at = VALUES(updated_at)
-      `,
-        {
-          replacements: {
-            id: defaultUserId,
-            organizationId,
-            firstName: 'Ralph',
-            lastName: 'Brabante',
-            email: defaultEmail,
-            password: hashedDefaultPassword,
-            phone: '+1-415-555-0099',
-            addressLine1: '100 Workspace Drive',
-            city: 'San Francisco',
-            state: 'CA',
-            postalCode: '94105',
-            country: 'United States',
-            role: 'SUPERUSER',
-            status: 'active',
-            emailVerifiedAt: now,
-            createdAt: now,
-            updatedAt: now,
-          },
-          transaction,
-        }
-      );
-
-      const superuserRoleId = roleIdByCode.superuser;
-
-      if (superuserRoleId) {
-        await queryInterface.sequelize.query(
-          `
-          INSERT INTO user_roles (
-            id, user_id, role_id, assigned_at, assigned_by_user_id, is_active, created_at, updated_at
-          )
-          VALUES (UUID(), :userId, :roleId, :assignedAt, NULL, true, :createdAt, :updatedAt)
-          ON DUPLICATE KEY UPDATE
-            is_active = VALUES(is_active),
-            updated_at = VALUES(updated_at)
-        `,
-          {
-            replacements: {
-              userId: defaultUserId,
-              roleId: superuserRoleId,
-              assignedAt: now,
-              createdAt: now,
-              updatedAt: now,
-            },
-            transaction,
-          }
-        );
-      }
-
-      await queryInterface.sequelize.query(
-        `
-        INSERT INTO organization_users (
-          id, organization_id, user_id, role, is_active, created_at, updated_at
-        )
-        VALUES (UUID(), :organizationId, :userId, :role, true, :createdAt, :updatedAt)
-        ON DUPLICATE KEY UPDATE
-          role = VALUES(role),
-          is_active = VALUES(is_active),
-          updated_at = VALUES(updated_at)
-      `,
-        {
-          replacements: {
-            organizationId,
-            userId: defaultUserId,
-            role: 'SUPERUSER',
-            createdAt: now,
-            updatedAt: now,
-          },
-          transaction,
-        }
-      );
-
       await transaction.commit();
     } catch (err) {
       await transaction.rollback();
@@ -495,7 +331,6 @@ module.exports = {
     const transaction = await queryInterface.sequelize.transaction();
 
     try {
-      const email = 'ralphjohnbrabante@gmail.com';
       const roleCodes = [
         'administrator',
         'superuser',
@@ -545,8 +380,6 @@ module.exports = {
         'settings.update',
         'profile.manage',
       ];
-
-      await queryInterface.bulkDelete('users', { email }, { transaction });
 
       await queryInterface.sequelize.query(
         `

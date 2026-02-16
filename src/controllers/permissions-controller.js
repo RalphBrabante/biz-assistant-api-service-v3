@@ -182,6 +182,12 @@ async function deletePermission(req, res) {
     if (!permission) {
       return res.status(404).json({ ok: false, message: 'Permission not found.' });
     }
+    if (permission.isSystem) {
+      return res.status(403).json({
+        ok: false,
+        message: 'System permission records cannot be deleted.',
+      });
+    }
 
     await permission.destroy();
     return res.status(200).json({ ok: true, message: 'Permission deleted successfully.' });

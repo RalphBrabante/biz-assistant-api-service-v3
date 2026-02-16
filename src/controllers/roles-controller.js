@@ -188,6 +188,12 @@ async function deleteRole(req, res) {
     if (!role) {
       return res.status(404).json({ ok: false, message: 'Role not found.' });
     }
+    if (role.isSystem) {
+      return res.status(403).json({
+        ok: false,
+        message: 'System role records cannot be deleted.',
+      });
+    }
 
     await role.destroy();
     return res.status(200).json({ ok: true, message: 'Role deleted successfully.' });

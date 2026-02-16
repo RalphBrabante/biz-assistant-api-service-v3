@@ -41,6 +41,11 @@ function initWithholdingTaxTypeModel(sequelize) {
         allowNull: false,
         defaultValue: 0.0,
       },
+      isSystem: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
       isActive: {
         type: DataTypes.BOOLEAN,
         allowNull: false,
@@ -67,6 +72,7 @@ function initWithholdingTaxTypeModel(sequelize) {
         { fields: ['name'] },
         { fields: ['percentage'] },
         { fields: ['applies_to'] },
+        { fields: ['is_system'] },
         { fields: ['is_active'] },
         { fields: ['created_by'] },
         { fields: ['updated_by'] },

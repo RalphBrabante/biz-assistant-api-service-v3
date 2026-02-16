@@ -29,6 +29,7 @@ module.exports = {
           percentage: 1.0,
           applies_to: 'expense',
           minimum_base_amount: 0.0,
+          is_system: true,
           is_active: true,
           created_by: null,
           updated_by: null,
@@ -44,6 +45,7 @@ module.exports = {
           percentage: 2.0,
           applies_to: 'expense',
           minimum_base_amount: 0.0,
+          is_system: true,
           is_active: true,
           created_by: null,
           updated_by: null,
@@ -53,7 +55,47 @@ module.exports = {
       );
     }
 
-    await queryInterface.bulkInsert('withholding_tax_types', rows);
+    for (const row of rows) {
+      await queryInterface.sequelize.query(
+        `
+        INSERT INTO withholding_tax_types (
+          id, organization_id, code, name, description, percentage, applies_to,
+          minimum_base_amount, is_system, is_active, created_by, updated_by, created_at, updated_at
+        ) VALUES (
+          :id, :organizationId, :code, :name, :description, :percentage, :appliesTo,
+          :minimumBaseAmount, :isSystem, :isActive, :createdBy, :updatedBy, :createdAt, :updatedAt
+        )
+        ON DUPLICATE KEY UPDATE
+          name = VALUES(name),
+          description = VALUES(description),
+          percentage = VALUES(percentage),
+          applies_to = VALUES(applies_to),
+          minimum_base_amount = VALUES(minimum_base_amount),
+          is_system = VALUES(is_system),
+          is_active = VALUES(is_active),
+          updated_by = VALUES(updated_by),
+          updated_at = VALUES(updated_at)
+      `,
+        {
+          replacements: {
+            id: row.id,
+            organizationId: row.organization_id,
+            code: row.code,
+            name: row.name,
+            description: row.description,
+            percentage: row.percentage,
+            appliesTo: row.applies_to,
+            minimumBaseAmount: row.minimum_base_amount,
+            isSystem: row.is_system,
+            isActive: row.is_active,
+            createdBy: row.created_by,
+            updatedBy: row.updated_by,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+          },
+        }
+      );
+    }
   },
 
   async down(queryInterface) {
@@ -62,4 +104,3 @@ module.exports = {
     });
   },
 };
-

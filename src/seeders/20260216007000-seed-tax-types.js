@@ -11,6 +11,7 @@ module.exports = {
         name: 'Value Added Tax',
         description: 'Standard Value Added Tax',
         percentage: 12.0,
+        is_system: true,
         is_active: true,
         created_at: now,
         updated_at: now,
@@ -21,13 +22,44 @@ module.exports = {
         name: 'Percentage Tax',
         description: 'Percentage Tax',
         percentage: 3.0,
+        is_system: true,
         is_active: true,
         created_at: now,
         updated_at: now,
       },
     ];
 
-    await queryInterface.bulkInsert('tax_types', rows);
+    for (const row of rows) {
+      await queryInterface.sequelize.query(
+        `
+        INSERT INTO tax_types (
+          id, code, name, description, percentage, is_system, is_active, created_at, updated_at
+        ) VALUES (
+          :id, :code, :name, :description, :percentage, :isSystem, :isActive, :createdAt, :updatedAt
+        )
+        ON DUPLICATE KEY UPDATE
+          name = VALUES(name),
+          description = VALUES(description),
+          percentage = VALUES(percentage),
+          is_system = VALUES(is_system),
+          is_active = VALUES(is_active),
+          updated_at = VALUES(updated_at)
+      `,
+        {
+          replacements: {
+            id: row.id,
+            code: row.code,
+            name: row.name,
+            description: row.description,
+            percentage: row.percentage,
+            isSystem: row.is_system,
+            isActive: row.is_active,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+          },
+        }
+      );
+    }
   },
 
   async down(queryInterface) {

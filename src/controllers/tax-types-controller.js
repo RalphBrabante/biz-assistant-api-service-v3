@@ -157,6 +157,12 @@ async function deleteTaxType(req, res) {
     if (!row) {
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Tax type not found.' });
     }
+    if (row.isSystem) {
+      return res.status(403).json({
+        code: 'FORBIDDEN',
+        message: 'System tax type records cannot be deleted.',
+      });
+    }
 
     await row.destroy();
     return res.status(200).json({

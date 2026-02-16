@@ -220,6 +220,12 @@ async function deleteWithholdingTaxType(req, res) {
     if (!row) {
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Withholding tax type not found.' });
     }
+    if (row.isSystem) {
+      return res.status(403).json({
+        code: 'FORBIDDEN',
+        message: 'System withholding tax type records cannot be deleted.',
+      });
+    }
 
     const authOrgId = getAuthenticatedOrganizationId(req);
     if (!isPrivilegedRequest(req) && row.organizationId !== authOrgId) {
