@@ -1,48 +1,11 @@
-const nodemailer = require('nodemailer');
 const { buildPasswordResetTemplate } = require('../templates/emails/password-reset-template');
 const { buildEmailVerificationTemplate } = require('../templates/emails/email-verification-template');
 const {
   buildOrganizationUserInviteTemplate,
 } = require('../templates/emails/organization-user-invite-template');
-
-let transporter;
-let usingJsonTransport = false;
-
-function parseBoolean(value, fallback = false) {
-  if (value === undefined || value === null || value === '') {
-    return fallback;
-  }
-  const normalized = String(value).trim().toLowerCase();
-  return normalized === 'true' || normalized === '1' || normalized === 'yes';
-}
-
-function getTransporter() {
-  if (transporter) {
-    return transporter;
-  }
-
-  const host = String(process.env.SMTP_HOST || '').trim();
-  const port = Number(process.env.SMTP_PORT || 587);
-  const secure = parseBoolean(process.env.SMTP_SECURE, false);
-  const user = String(process.env.SMTP_USER || '').trim();
-  const pass = String(process.env.SMTP_PASS || '').trim();
-
-  if (!host) {
-    usingJsonTransport = true;
-    transporter = nodemailer.createTransport({ jsonTransport: true });
-    return transporter;
-  }
-
-  const auth = user ? { user, pass } : undefined;
-  transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth,
-  });
-  usingJsonTransport = false;
-  return transporter;
-}
+const {
+  buildLicenseRevokedTemplate,
+} = require('../templates/emails/license-revoked-template');
 
 async function sendViaSmtp2go({ toEmail, subject, html, text }) {
   const apiKey = String(process.env.SMTP2GO_API_KEY || '').trim();
@@ -99,40 +62,11 @@ async function sendViaSmtp2go({ toEmail, subject, html, text }) {
 }
 
 async function sendMail({ toEmail, subject, html, text }) {
-  const fromName = String(process.env.SMTP_FROM_NAME || 'Biz Assistant').trim();
-  const fromEmail = String(process.env.SMTP_FROM_EMAIL || 'no-reply@bizassistant.local').trim();
-  const from = `${fromName} <${fromEmail}>`;
-
-  const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
   const smtp2goApiKey = String(process.env.SMTP2GO_API_KEY || '').trim();
-
-  if (smtp2goApiKey) {
-    const smtp2goResult = await sendViaSmtp2go({ toEmail, subject, html, text });
-    if (smtp2goResult) {
-      return smtp2goResult;
-    }
+  if (!smtp2goApiKey) {
+    throw new Error('SMTP2GO_API_KEY is required. SMTP credentials fallback is disabled.');
   }
-
-  if (isProduction) {
-    throw new Error(
-      'SMTP2GO_API_KEY is required in production. SMTP fallback is disabled.'
-    );
-  }
-
-  const mail = {
-    from,
-    to: toEmail,
-    subject,
-    html,
-    text,
-  };
-
-  const client = getTransporter();
-  const info = await client.sendMail(mail);
-  if (usingJsonTransport) {
-    console.log('Email transport is in json mode. Message payload:', info.message || info);
-  }
-  return info;
+  return sendViaSmtp2go({ toEmail, subject, html, text });
 }
 
 async function sendPasswordResetEmail({
@@ -294,40 +228,19 @@ async function sendLicenseRevokedEmail({
   licenseKey,
   licensesUrl,
 }) {
-  const brandName = String(process.env.APP_NAME || 'Biz Assistant').trim();
-  const safeRecipient = toName || 'there';
-  const safeOrganization = organizationName || 'your organization';
-  const safeLicenseKey = String(licenseKey || '').trim() || 'N/A';
-  const safeLicensesUrl = String(licensesUrl || '').trim();
-  const subject = `${brandName} License Revoked: ${safeOrganization}`;
-
-  const html = `
-<p>Hi ${safeRecipient},</p>
-<p>
-  A license for <strong>${safeOrganization}</strong> has been revoked.
-</p>
-<p><strong>License key:</strong> ${safeLicenseKey}</p>
-<p>
-  <a href="${safeLicensesUrl}" style="color:#2563eb;">Open licenses page</a>
-</p>
-<p>If the link does not work, copy and open this URL:</p>
-<p>${safeLicensesUrl}</p>
-`.trim();
-
-  const text = [
-    `Hi ${safeRecipient},`,
-    '',
-    `A license for ${safeOrganization} has been revoked.`,
-    `License key: ${safeLicenseKey}`,
-    '',
-    `Open licenses page: ${safeLicensesUrl}`,
-  ].join('\n');
+  const template = buildLicenseRevokedTemplate({
+    brandName: String(process.env.APP_NAME || 'Biz Assistant').trim(),
+    recipientName: toName,
+    organizationName,
+    licenseKey,
+    licensesUrl,
+  });
 
   return sendMail({
     toEmail,
-    subject,
-    html,
-    text,
+    subject: template.subject,
+    html: template.html,
+    text: template.text,
   });
 }
 
