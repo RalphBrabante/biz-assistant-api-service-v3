@@ -14,10 +14,14 @@ function buildOrderPreviewUrl(orderId) {
   return `${appBaseUrl.replace(/\/+$/, '')}/orders/${encodeURIComponent(orderId)}`;
 }
 
-function hasRoleCode(user, roleCodes = []) {
+function hasRoleCode(user, roleCodes = [], membershipRole = '') {
   const allowed = roleCodes.map((value) => String(value || '').toLowerCase());
   const primaryRole = String(user?.role || '').toLowerCase();
   if (primaryRole && allowed.includes(primaryRole)) {
+    return true;
+  }
+  const orgMembershipRole = String(membershipRole || '').toLowerCase();
+  if (orgMembershipRole && allowed.includes(orgMembershipRole)) {
     return true;
   }
   const memberships = Array.isArray(user?.roles) ? user.roles : [];
@@ -40,8 +44,26 @@ async function notifyOrderCreated(models, order) {
     attributes: ['id', 'email', 'firstName', 'lastName', 'role', 'isActive'],
     through: {
       where: { isActive: true },
-      attributes: [],
+      attributes: ['role', 'isActive'],
     },
+    include: [
+      {
+        model: models.Role,
+        as: 'roles',
+        through: { attributes: [] },
+        required: false,
+      },
+    ],
+  });
+
+  // Some legacy/current records are scoped only by users.organizationId and may not exist in organization_users.
+  // Include them so notifications still reach eligible roles.
+  const primaryUsers = await models.User.findAll({
+    where: {
+      organizationId: order.organizationId,
+      isActive: true,
+    },
+    attributes: ['id', 'email', 'firstName', 'lastName', 'role', 'isActive'],
     include: [
       {
         model: models.Role,
@@ -54,12 +76,14 @@ async function notifyOrderCreated(models, order) {
 
   const recipients = [];
   const seenEmails = new Set();
-  for (const user of orgUsers || []) {
+  const candidates = [...(orgUsers || []), ...(primaryUsers || [])];
+  for (const user of candidates) {
     const email = String(user?.email || '').toLowerCase().trim();
     if (!user?.isActive || !email || seenEmails.has(email)) {
       continue;
     }
-    if (!hasRoleCode(user, ['administrator', 'inventorymanager'])) {
+    const membershipRole = String(user?.OrganizationUser?.role || '').toLowerCase();
+    if (!hasRoleCode(user, ['administrator', 'inventorymanager', 'inventory_manager'], membershipRole)) {
       continue;
     }
     seenEmails.add(email);
@@ -70,6 +94,10 @@ async function notifyOrderCreated(models, order) {
   }
 
   if (recipients.length === 0) {
+    console.warn(
+      'Order created notification skipped: no recipients matched administrator/inventorymanager roles.',
+      { organizationId: order.organizationId, orderId: order.id }
+    );
     return;
   }
 
@@ -77,7 +105,7 @@ async function notifyOrderCreated(models, order) {
   const organizationName = organization.name || organization.legalName || 'your organization';
   const orderNumber = order.orderNumber || order.id;
 
-  await Promise.allSettled(
+  const results = await Promise.allSettled(
     recipients.map((recipient) =>
       sendOrderCreatedEmail({
         toEmail: recipient.email,
@@ -88,6 +116,16 @@ async function notifyOrderCreated(models, order) {
       })
     )
   );
+  const failures = results.filter((result) => result.status === 'rejected');
+  if (failures.length > 0) {
+    console.error('Order created email notifications had failures:', {
+      organizationId: order.organizationId,
+      orderId: order.id,
+      attempted: recipients.length,
+      failed: failures.length,
+      reasons: failures.map((result) => String(result.reason?.message || result.reason || 'unknown')),
+    });
+  }
 }
 
 function getOrderModel() {

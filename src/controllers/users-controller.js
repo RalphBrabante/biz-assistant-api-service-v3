@@ -1,7 +1,10 @@
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
-const { sendOrganizationUserInviteEmail } = require('../services/email-service');
+const {
+  sendOrganizationUserInviteEmail,
+  sendUserCreatedAdminNotificationEmail,
+} = require('../services/email-service');
 const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
@@ -112,10 +115,94 @@ function buildSetPasswordUrl(rawToken) {
   )}`;
 }
 
+function buildUserDetailsUrl(userId) {
+  const appBaseUrl = String(process.env.APP_BASE_URL || 'http://localhost').trim();
+  return `${appBaseUrl.replace(/\/+$/, '')}/users/${encodeURIComponent(userId)}`;
+}
+
 function sanitizeUser(user) {
   const json = user.toJSON();
   delete json.password;
   return json;
+}
+
+function hasRoleCode(user, roleCodes = [], membershipRole = '') {
+  const allowed = roleCodes.map((value) => String(value || '').toLowerCase());
+  const primaryRole = String(user?.role || '').toLowerCase();
+  if (primaryRole && allowed.includes(primaryRole)) {
+    return true;
+  }
+  const orgMembershipRole = String(membershipRole || '').toLowerCase();
+  if (orgMembershipRole && allowed.includes(orgMembershipRole)) {
+    return true;
+  }
+  const memberships = Array.isArray(user?.roles) ? user.roles : [];
+  return memberships.some((role) => allowed.includes(String(role?.code || '').toLowerCase()));
+}
+
+async function collectOrganizationAdministratorRecipients(models, organizationId) {
+  if (!models?.Organization || !models?.User || !models?.Role || !organizationId) {
+    return { organization: null, recipients: [] };
+  }
+
+  const organization = await models.Organization.findByPk(organizationId);
+  if (!organization) {
+    return { organization: null, recipients: [] };
+  }
+
+  const orgUsers = await organization.getUsers({
+    attributes: ['id', 'email', 'firstName', 'lastName', 'role', 'isActive'],
+    through: {
+      where: { isActive: true },
+      attributes: ['role', 'isActive'],
+    },
+    include: [
+      {
+        model: models.Role,
+        as: 'roles',
+        through: { attributes: [] },
+        required: false,
+      },
+    ],
+  });
+
+  const primaryUsers = await models.User.findAll({
+    where: {
+      organizationId,
+      isActive: true,
+    },
+    attributes: ['id', 'email', 'firstName', 'lastName', 'role', 'isActive'],
+    include: [
+      {
+        model: models.Role,
+        as: 'roles',
+        through: { attributes: [] },
+        required: false,
+      },
+    ],
+  });
+
+  const recipients = [];
+  const seenEmails = new Set();
+  const candidates = [...(orgUsers || []), ...(primaryUsers || [])];
+  for (const user of candidates) {
+    const email = String(user?.email || '').toLowerCase().trim();
+    if (!user?.isActive || !email || seenEmails.has(email)) {
+      continue;
+    }
+    const membershipRole = String(user?.OrganizationUser?.role || '').toLowerCase();
+    if (!hasRoleCode(user, ['administrator'], membershipRole)) {
+      continue;
+    }
+
+    seenEmails.add(email);
+    recipients.push({
+      email,
+      name: [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || email,
+    });
+  }
+
+  return { organization, recipients };
 }
 
 async function createUser(req, res) {
@@ -131,7 +218,7 @@ async function createUser(req, res) {
     ) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { User, Role, UserRole, Token, Organization } = models;
+    const { User, Role, UserRole, OrganizationUser, Token, Organization } = models;
 
     const payload = cleanUndefined(pickUserPayload(req.body));
     const requesterIsSuper = isRequesterSuperuser(req);
@@ -212,6 +299,18 @@ async function createUser(req, res) {
     }
 
     const user = await User.create(payload);
+    if (OrganizationUser && user.organizationId) {
+      await OrganizationUser.findOrCreate({
+        where: {
+          organizationId: user.organizationId,
+          userId: user.id,
+        },
+        defaults: {
+          role: String(payload.role || 'member').toLowerCase(),
+          isActive: user.isActive !== false,
+        },
+      });
+    }
     if (resolvedRoles.length > 0) {
       await UserRole.bulkCreate(
         resolvedRoles.map((role) => ({
@@ -224,6 +323,7 @@ async function createUser(req, res) {
     }
 
     let inviteEmail = { sent: false, message: 'Invite email was not sent.' };
+    let adminNotification = { sent: false, attempted: 0, failed: 0 };
     const normalizedEmail = String(user.email || '').toLowerCase().trim();
     if (normalizedEmail) {
       try {
@@ -288,12 +388,63 @@ async function createUser(req, res) {
       }
     }
 
+    try {
+      const { organization, recipients } = await collectOrganizationAdministratorRecipients(
+        models,
+        user.organizationId
+      );
+      if (recipients.length > 0) {
+        const createdUserName =
+          [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || normalizedEmail;
+        const createdRoleLabels = resolvedRoles.map(
+          (role) => role.name || String(role.code || '').toUpperCase()
+        );
+        const userUrl = buildUserDetailsUrl(user.id);
+        const results = await Promise.allSettled(
+          recipients.map((recipient) =>
+            sendUserCreatedAdminNotificationEmail({
+              toEmail: recipient.email,
+              toName: recipient.name,
+              organizationName:
+                organization?.name || organization?.legalName || 'your organization',
+              createdUserName,
+              createdUserEmail: normalizedEmail,
+              roleLabels: createdRoleLabels,
+              userUrl,
+            })
+          )
+        );
+        const failed = results.filter((result) => result.status === 'rejected').length;
+        adminNotification = {
+          sent: failed === 0,
+          attempted: recipients.length,
+          failed,
+        };
+        if (failed > 0) {
+          console.error('Create user admin notifications had failures:', {
+            organizationId: user.organizationId,
+            userId: user.id,
+            attempted: recipients.length,
+            failed,
+          });
+        }
+      } else {
+        console.warn('Create user admin notification skipped: no administrator recipients found.', {
+          organizationId: user.organizationId,
+          userId: user.id,
+        });
+      }
+    } catch (notifyErr) {
+      console.error('Create user admin notification error:', notifyErr);
+    }
+
     return res.status(201).json({
       ok: true,
       message: 'User created successfully.',
       data: {
         ...sanitizeUser(user),
         inviteEmail,
+        adminNotification,
       },
     });
   } catch (err) {

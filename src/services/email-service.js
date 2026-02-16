@@ -331,6 +331,58 @@ async function sendLicenseRevokedEmail({
   });
 }
 
+async function sendUserCreatedAdminNotificationEmail({
+  toEmail,
+  toName,
+  organizationName,
+  createdUserName,
+  createdUserEmail,
+  roleLabels = [],
+  userUrl,
+}) {
+  const brandName = String(process.env.APP_NAME || 'Biz Assistant').trim();
+  const safeRecipient = toName || 'there';
+  const safeOrganization = organizationName || 'your organization';
+  const safeCreatedUserName = String(createdUserName || '').trim() || 'New user';
+  const safeCreatedUserEmail = String(createdUserEmail || '').trim() || '-';
+  const safeUserUrl = String(userUrl || '').trim();
+  const roleText = Array.isArray(roleLabels) && roleLabels.length > 0 ? roleLabels.join(', ') : 'N/A';
+  const subject = `${brandName} User Created: ${safeCreatedUserName}`;
+
+  const html = `
+<p>Hi ${safeRecipient},</p>
+<p>
+  A new user was created under <strong>${safeOrganization}</strong>.
+</p>
+<p><strong>Name:</strong> ${safeCreatedUserName}</p>
+<p><strong>Email:</strong> ${safeCreatedUserEmail}</p>
+<p><strong>Assigned roles:</strong> ${roleText}</p>
+<p>
+  <a href="${safeUserUrl}" style="color:#2563eb;">Open user details</a>
+</p>
+<p>If the link does not work, copy and open this URL:</p>
+<p>${safeUserUrl}</p>
+`.trim();
+
+  const text = [
+    `Hi ${safeRecipient},`,
+    '',
+    `A new user was created under ${safeOrganization}.`,
+    `Name: ${safeCreatedUserName}`,
+    `Email: ${safeCreatedUserEmail}`,
+    `Assigned roles: ${roleText}`,
+    '',
+    `Open user details: ${safeUserUrl}`,
+  ].join('\n');
+
+  return sendMail({
+    toEmail,
+    subject,
+    html,
+    text,
+  });
+}
+
 module.exports = {
   sendPasswordResetEmail,
   sendEmailVerificationEmail,
@@ -338,4 +390,5 @@ module.exports = {
   sendQuarterlyExpenseReportReadyEmail,
   sendOrderCreatedEmail,
   sendLicenseRevokedEmail,
+  sendUserCreatedAdminNotificationEmail,
 };

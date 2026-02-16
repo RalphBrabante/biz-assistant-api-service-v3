@@ -77,13 +77,23 @@ async function notifyOrganizationUsersLicenseRevoked(models, license) {
     attributes: ['id', 'email', 'firstName', 'lastName', 'isActive'],
     through: {
       where: { isActive: true },
-      attributes: [],
+      attributes: ['isActive'],
     },
+  });
+
+  // Include users linked by primary organization even if they are missing organization_users records.
+  const primaryUsers = await models.User.findAll({
+    where: {
+      organizationId: license.organizationId,
+      isActive: true,
+    },
+    attributes: ['id', 'email', 'firstName', 'lastName', 'isActive'],
   });
 
   const recipients = [];
   const seenEmails = new Set();
-  for (const user of orgUsers || []) {
+  const candidates = [...(orgUsers || []), ...(primaryUsers || [])];
+  for (const user of candidates) {
     const email = String(user?.email || '').toLowerCase().trim();
     if (!user?.isActive || !email || seenEmails.has(email)) {
       continue;
@@ -96,12 +106,16 @@ async function notifyOrganizationUsersLicenseRevoked(models, license) {
   }
 
   if (recipients.length === 0) {
+    console.warn('License revoked notification skipped: no active recipients found.', {
+      organizationId: license.organizationId,
+      licenseId: license.id,
+    });
     return;
   }
 
   const organizationName = organization.name || organization.legalName || 'your organization';
   const licensesUrl = buildLicensesPageUrl();
-  await Promise.allSettled(
+  const results = await Promise.allSettled(
     recipients.map((recipient) =>
       sendLicenseRevokedEmail({
         toEmail: recipient.email,
@@ -112,6 +126,16 @@ async function notifyOrganizationUsersLicenseRevoked(models, license) {
       })
     )
   );
+  const failures = results.filter((result) => result.status === 'rejected');
+  if (failures.length > 0) {
+    console.error('License revoked email notifications had failures:', {
+      organizationId: license.organizationId,
+      licenseId: license.id,
+      attempted: recipients.length,
+      failed: failures.length,
+      reasons: failures.map((result) => String(result.reason?.message || result.reason || 'unknown')),
+    });
+  }
 }
 
 async function createLicense(req, res) {
