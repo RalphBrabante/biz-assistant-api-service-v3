@@ -100,9 +100,20 @@ async function sendMail({ toEmail, subject, html, text }) {
   const fromEmail = String(process.env.SMTP_FROM_EMAIL || 'no-reply@bizassistant.local').trim();
   const from = `${fromName} <${fromEmail}>`;
 
-  const smtp2goResult = await sendViaSmtp2go({ toEmail, subject, html, text });
-  if (smtp2goResult) {
-    return smtp2goResult;
+  const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+  const smtp2goApiKey = String(process.env.SMTP2GO_API_KEY || '').trim();
+
+  if (smtp2goApiKey) {
+    const smtp2goResult = await sendViaSmtp2go({ toEmail, subject, html, text });
+    if (smtp2goResult) {
+      return smtp2goResult;
+    }
+  }
+
+  if (isProduction) {
+    throw new Error(
+      'SMTP2GO_API_KEY is required in production. SMTP fallback is disabled.'
+    );
   }
 
   const mail = {
