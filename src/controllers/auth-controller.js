@@ -139,12 +139,31 @@ async function login(req, res) {
       lastLoginAt: new Date(),
     });
 
+    let effectiveOrganizationId = user.organizationId || null;
+    if (!effectiveOrganizationId && models.OrganizationUser) {
+      const membership = await models.OrganizationUser.findOne({
+        where: {
+          userId: user.id,
+          isActive: true,
+        },
+        attributes: ['organizationId'],
+        order: [['createdAt', 'ASC']],
+      });
+      if (membership?.organizationId) {
+        effectiveOrganizationId = membership.organizationId;
+      }
+    }
+
     let organizationCurrency = 'USD';
-    if (user.organizationId && models.Organization) {
-      const organization = await models.Organization.findByPk(user.organizationId, {
-        attributes: ['id', 'currency'],
+    let organizationName = '';
+    let organizationLegalName = '';
+    if (effectiveOrganizationId && models.Organization) {
+      const organization = await models.Organization.findByPk(effectiveOrganizationId, {
+        attributes: ['id', 'name', 'legalName', 'currency'],
       });
       organizationCurrency = String(organization?.currency || 'USD').toUpperCase().slice(0, 3) || 'USD';
+      organizationName = String(organization?.name || '').trim();
+      organizationLegalName = String(organization?.legalName || '').trim();
     }
 
     const roleCodes = (user.roles || []).map((role) =>
@@ -175,7 +194,9 @@ async function login(req, res) {
           profileImageUrl: user.profileImageUrl,
           status: user.status,
           isEmailVerified: user.isEmailVerified,
-          organizationId: user.organizationId,
+          organizationId: effectiveOrganizationId,
+          organizationName,
+          organizationLegalName,
           currency: organizationCurrency,
           roleCodes,
           permissionCodes,
@@ -187,6 +208,62 @@ async function login(req, res) {
     return res.status(500).json({
       ok: false,
       message: 'Unable to process login request.',
+    });
+  }
+}
+
+async function getSession(req, res) {
+  try {
+    const models = getModels();
+    if (!models || !models.Organization) {
+      return res.status(503).json({
+        ok: false,
+        message: 'Database models are not ready yet.',
+      });
+    }
+
+    const authUser = req.auth?.user || {};
+    const organizationId = authUser.organizationId || null;
+    let organizationName = '';
+    let organizationLegalName = '';
+    let organizationCurrency = String(authUser.currency || 'USD').toUpperCase().slice(0, 3) || 'USD';
+
+    if (organizationId) {
+      const organization = await models.Organization.findByPk(organizationId, {
+        attributes: ['id', 'name', 'legalName', 'currency'],
+      });
+      organizationName = String(organization?.name || '').trim();
+      organizationLegalName = String(organization?.legalName || '').trim();
+      organizationCurrency =
+        String(organization?.currency || organizationCurrency || 'USD').toUpperCase().slice(0, 3) || 'USD';
+    }
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Session resolved.',
+      data: {
+        user: {
+          id: authUser.id,
+          email: authUser.email,
+          firstName: authUser.firstName,
+          lastName: authUser.lastName,
+          profileImageUrl: authUser.profileImageUrl,
+          status: authUser.status,
+          isEmailVerified: authUser.isEmailVerified,
+          organizationId,
+          organizationName,
+          organizationLegalName,
+          currency: organizationCurrency,
+          roleCodes: req.auth?.roleCodes || [],
+          permissionCodes: Array.from(req.auth?.permissions || []),
+        },
+      },
+    });
+  } catch (err) {
+    console.error('Get session error:', err);
+    return res.status(500).json({
+      ok: false,
+      message: 'Unable to resolve session.',
     });
   }
 }
@@ -389,7 +466,15 @@ async function resetPassword(req, res) {
       });
     }
 
-    await user.update({ password: newPassword });
+    const nextStatus = String(user.status || '').toLowerCase();
+    const shouldActivate =
+      nextStatus === 'pending_verification' || nextStatus === 'invited';
+    await user.update({
+      password: newPassword,
+      isEmailVerified: true,
+      emailVerifiedAt: new Date(),
+      ...(shouldActivate ? { status: 'active' } : {}),
+    });
 
     await models.Token.update(
       {
@@ -599,6 +684,7 @@ async function verifyEmail(req, res) {
 
 module.exports = {
   login,
+  getSession,
   forgotPassword,
   resetPassword,
   requestEmailVerification,

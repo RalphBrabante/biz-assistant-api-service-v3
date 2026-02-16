@@ -92,10 +92,27 @@ async function authenticateRequest(req, res, next) {
 
     const roles = (user.roles || []).map((role) => role.code);
     const isSuperuser = hasSuperuserRole(roles);
+    let effectiveOrganizationId = user.organizationId || null;
+
+    // Some users are linked via organization_users and may not have users.organization_id populated.
+    // Resolve a fallback organization so license checks and organization scoping still work.
+    if (!effectiveOrganizationId && models.OrganizationUser) {
+      const membership = await models.OrganizationUser.findOne({
+        where: {
+          userId: user.id,
+          isActive: true,
+        },
+        attributes: ['organizationId'],
+        order: [['createdAt', 'ASC']],
+      });
+      if (membership?.organizationId) {
+        effectiveOrganizationId = membership.organizationId;
+      }
+    }
 
     // Enforce organization license access for all non-superuser users.
     if (!isSuperuser) {
-      const organizationId = user.organizationId;
+      const organizationId = effectiveOrganizationId;
       if (!organizationId) {
         return res.status(403).json({
           code: 'LICENSE_INACTIVE',
@@ -133,7 +150,10 @@ async function authenticateRequest(req, res, next) {
     req.auth = {
       tokenId: tokenRecord.id,
       userId: user.id,
-      user,
+      user: {
+        ...user.toJSON(),
+        organizationId: effectiveOrganizationId,
+      },
       roleCodes: roles.map((r) => String(r || '').toLowerCase()),
       permissions,
       isPrivileged: hasPrivilegedRole(roles),
