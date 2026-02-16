@@ -1,6 +1,9 @@
 const nodemailer = require('nodemailer');
 const { buildPasswordResetTemplate } = require('../templates/emails/password-reset-template');
 const { buildEmailVerificationTemplate } = require('../templates/emails/email-verification-template');
+const {
+  buildOrganizationUserInviteTemplate,
+} = require('../templates/emails/organization-user-invite-template');
 
 let transporter;
 let usingJsonTransport = false;
@@ -174,7 +177,165 @@ async function sendEmailVerificationEmail({
   });
 }
 
+async function sendOrganizationUserInviteEmail({
+  toEmail,
+  toName,
+  organizationName,
+  setPasswordUrl,
+  expiresInMinutes = 30,
+}) {
+  const template = buildOrganizationUserInviteTemplate({
+    brandName: String(process.env.APP_NAME || 'Biz Assistant').trim(),
+    recipientName: toName,
+    organizationName,
+    setPasswordUrl,
+    expiresInMinutes,
+  });
+
+  return sendMail({
+    toEmail,
+    subject: template.subject,
+    html: template.html,
+    text: template.text,
+  });
+}
+
+async function sendQuarterlyExpenseReportReadyEmail({
+  toEmail,
+  toName,
+  organizationName,
+  quarter,
+  year,
+  reportUrl,
+}) {
+  const brandName = String(process.env.APP_NAME || 'Biz Assistant').trim();
+  const safeRecipient = toName || 'there';
+  const safeOrganization = organizationName || 'your organization';
+  const safeQuarter = String(quarter || '').trim() || 'Q?';
+  const safeYear = String(year || '').trim() || '';
+  const subject = `${brandName} ${safeQuarter} ${safeYear} Expense Report Ready`;
+
+  const html = `
+<p>Hi ${safeRecipient},</p>
+<p>
+  The quarterly expense report for <strong>${safeOrganization}</strong>
+  (${safeQuarter} ${safeYear}) has been generated.
+</p>
+<p>
+  <a href="${reportUrl}" style="color:#2563eb;">Open report preview</a>
+</p>
+<p>If the link does not work, copy and open this URL:</p>
+<p>${reportUrl}</p>
+`.trim();
+
+  const text = [
+    `Hi ${safeRecipient},`,
+    '',
+    `The quarterly expense report for ${safeOrganization} (${safeQuarter} ${safeYear}) has been generated.`,
+    '',
+    `Open report preview: ${reportUrl}`,
+  ].join('\n');
+
+  return sendMail({
+    toEmail,
+    subject,
+    html,
+    text,
+  });
+}
+
+async function sendOrderCreatedEmail({
+  toEmail,
+  toName,
+  organizationName,
+  orderNumber,
+  orderUrl,
+}) {
+  const brandName = String(process.env.APP_NAME || 'Biz Assistant').trim();
+  const safeRecipient = toName || 'there';
+  const safeOrganization = organizationName || 'your organization';
+  const safeOrderNumber = String(orderNumber || '').trim() || 'N/A';
+  const safeOrderUrl = String(orderUrl || '').trim();
+  const subject = `${brandName} Order Created: ${safeOrderNumber}`;
+
+  const html = `
+<p>Hi ${safeRecipient},</p>
+<p>
+  A new order <strong>${safeOrderNumber}</strong> was created for
+  <strong>${safeOrganization}</strong>.
+</p>
+<p>
+  <a href="${safeOrderUrl}" style="color:#2563eb;">Open order details</a>
+</p>
+<p>If the link does not work, copy and open this URL:</p>
+<p>${safeOrderUrl}</p>
+`.trim();
+
+  const text = [
+    `Hi ${safeRecipient},`,
+    '',
+    `A new order ${safeOrderNumber} was created for ${safeOrganization}.`,
+    '',
+    `Open order details: ${safeOrderUrl}`,
+  ].join('\n');
+
+  return sendMail({
+    toEmail,
+    subject,
+    html,
+    text,
+  });
+}
+
+async function sendLicenseRevokedEmail({
+  toEmail,
+  toName,
+  organizationName,
+  licenseKey,
+  licensesUrl,
+}) {
+  const brandName = String(process.env.APP_NAME || 'Biz Assistant').trim();
+  const safeRecipient = toName || 'there';
+  const safeOrganization = organizationName || 'your organization';
+  const safeLicenseKey = String(licenseKey || '').trim() || 'N/A';
+  const safeLicensesUrl = String(licensesUrl || '').trim();
+  const subject = `${brandName} License Revoked: ${safeOrganization}`;
+
+  const html = `
+<p>Hi ${safeRecipient},</p>
+<p>
+  A license for <strong>${safeOrganization}</strong> has been revoked.
+</p>
+<p><strong>License key:</strong> ${safeLicenseKey}</p>
+<p>
+  <a href="${safeLicensesUrl}" style="color:#2563eb;">Open licenses page</a>
+</p>
+<p>If the link does not work, copy and open this URL:</p>
+<p>${safeLicensesUrl}</p>
+`.trim();
+
+  const text = [
+    `Hi ${safeRecipient},`,
+    '',
+    `A license for ${safeOrganization} has been revoked.`,
+    `License key: ${safeLicenseKey}`,
+    '',
+    `Open licenses page: ${safeLicensesUrl}`,
+  ].join('\n');
+
+  return sendMail({
+    toEmail,
+    subject,
+    html,
+    text,
+  });
+}
+
 module.exports = {
   sendPasswordResetEmail,
   sendEmailVerificationEmail,
+  sendOrganizationUserInviteEmail,
+  sendQuarterlyExpenseReportReadyEmail,
+  sendOrderCreatedEmail,
+  sendLicenseRevokedEmail,
 };

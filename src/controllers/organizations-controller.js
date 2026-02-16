@@ -1,5 +1,7 @@
+const crypto = require('crypto');
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
+const { sendOrganizationUserInviteEmail } = require('../services/email-service');
 const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
@@ -28,6 +30,7 @@ function getOrganizationMembershipModels() {
     OrganizationUser: models.OrganizationUser,
     Role: models.Role || null,
     UserRole: models.UserRole || null,
+    Token: models.Token || null,
   };
 }
 
@@ -69,6 +72,21 @@ function parseBoolean(value) {
     return false;
   }
   return undefined;
+}
+
+function isRequesterSuperuser(req) {
+  const roleCodes = req.auth?.roleCodes || [];
+  return roleCodes.some((code) => String(code || '').toLowerCase() === 'superuser');
+}
+
+function buildSetPasswordUrl(rawToken) {
+  const appBaseUrl = String(process.env.APP_BASE_URL || 'http://localhost').trim();
+  const resetPath = String(process.env.RESET_PASSWORD_PATH || '/reset-password').trim();
+  const safePath = resetPath.startsWith('/') ? resetPath : `/${resetPath}`;
+  const separator = safePath.includes('?') ? '&' : '?';
+  return `${appBaseUrl.replace(/\/+$/, '')}${safePath}${separator}token=${encodeURIComponent(
+    rawToken
+  )}`;
 }
 
 function sanitizeUser(user) {
@@ -367,7 +385,7 @@ async function addUserToOrganization(req, res) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const { Organization, User, OrganizationUser, Role, UserRole } = models;
+    const { Organization, User, OrganizationUser, Role, UserRole, Token } = models;
     if (!assertOrganizationAccess(req, req.params.id)) {
       return res.status(404).json({ ok: false, message: 'Organization not found.' });
     }
@@ -392,10 +410,29 @@ async function addUserToOrganization(req, res) {
     let resolvedRoleCode = requestedRole;
     let resolvedRoleId = null;
 
+    if (
+      String(requestedRole || '').toLowerCase() === 'superuser' &&
+      !isRequesterSuperuser(req)
+    ) {
+      return res.status(403).json({
+        ok: false,
+        message: 'Only superusers can assign the SUPERUSER role.',
+      });
+    }
+
     if (requestedRoleId && Role) {
       const roleRecord = await Role.findByPk(requestedRoleId);
       if (!roleRecord) {
         return res.status(404).json({ ok: false, message: 'Role not found.' });
+      }
+      if (
+        String(roleRecord.code || '').toLowerCase() === 'superuser' &&
+        !isRequesterSuperuser(req)
+      ) {
+        return res.status(403).json({
+          ok: false,
+          message: 'Only superusers can assign the SUPERUSER role.',
+        });
       }
       resolvedRoleCode = String(roleRecord.code || requestedRole).trim() || 'member';
       resolvedRoleId = roleRecord.id;
@@ -446,6 +483,71 @@ async function addUserToOrganization(req, res) {
       }
     }
 
+    const sendInviteFlag = parseBoolean(req.body?.sendInvite);
+    const shouldSendInvite = sendInviteFlag === undefined ? created : sendInviteFlag;
+    let inviteEmail = null;
+
+    if (shouldSendInvite && user.email && Token) {
+      const normalizedEmail = String(user.email).toLowerCase().trim();
+      const expiresInMinutes = Number(process.env.PASSWORD_RESET_EXPIRES_MINUTES || 30);
+      const expiresAt = new Date(Date.now() + expiresInMinutes * 60 * 1000);
+      const rawToken = crypto.randomBytes(48).toString('hex');
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+      await Token.update(
+        {
+          isActive: false,
+          revokedAt: new Date(),
+          revokedReason: 'superseded_organization_invite',
+        },
+        {
+          where: {
+            userId: user.id,
+            type: 'reset_password',
+            isActive: true,
+            revokedAt: null,
+          },
+        }
+      );
+
+      await Token.create({
+        userId: user.id,
+        tokenHash,
+        type: 'reset_password',
+        scope: 'organization_invite',
+        expiresAt,
+        ipAddress: req.ip || null,
+        userAgent: req.get('user-agent') || null,
+        metadata: {
+          email: normalizedEmail,
+          organizationId: organization.id,
+          organizationName: organization.name,
+          invitedByUserId: req.auth?.userId || null,
+        },
+        isActive: true,
+      });
+
+      const setPasswordUrl = buildSetPasswordUrl(rawToken);
+      try {
+        await sendOrganizationUserInviteEmail({
+          toEmail: normalizedEmail,
+          toName:
+            [user.firstName, user.lastName].filter(Boolean).join(' ').trim() ||
+            normalizedEmail,
+          organizationName: organization.name || organization.legalName || 'your organization',
+          setPasswordUrl,
+          expiresInMinutes,
+        });
+        inviteEmail = { sent: true };
+      } catch (emailErr) {
+        console.error('Organization invite email error:', emailErr);
+        inviteEmail = {
+          sent: false,
+          message: 'Membership added, but invite email was not sent.',
+        };
+      }
+    }
+
     return res.status(created ? 201 : 200).json({
       ok: true,
       message: created ? 'User added to organization.' : 'Organization membership updated.',
@@ -456,6 +558,7 @@ async function addUserToOrganization(req, res) {
         role: membership.role,
         roleId: resolvedRoleId,
         isActive: membership.isActive,
+        inviteEmail,
       },
     });
   } catch (err) {

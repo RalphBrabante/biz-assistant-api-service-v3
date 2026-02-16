@@ -1,12 +1,94 @@
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
+const { sendOrderCreatedEmail } = require('../services/email-service');
 const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
   getScopedOrganizationId,
   applyOrganizationWhereScope,
 } = require('../services/request-scope');
+
+function buildOrderPreviewUrl(orderId) {
+  const appBaseUrl = String(process.env.APP_BASE_URL || 'http://localhost').trim();
+  return `${appBaseUrl.replace(/\/+$/, '')}/orders/${encodeURIComponent(orderId)}`;
+}
+
+function hasRoleCode(user, roleCodes = []) {
+  const allowed = roleCodes.map((value) => String(value || '').toLowerCase());
+  const primaryRole = String(user?.role || '').toLowerCase();
+  if (primaryRole && allowed.includes(primaryRole)) {
+    return true;
+  }
+  const memberships = Array.isArray(user?.roles) ? user.roles : [];
+  return memberships.some((role) =>
+    allowed.includes(String(role?.code || '').toLowerCase())
+  );
+}
+
+async function notifyOrderCreated(models, order) {
+  if (!models?.Organization || !models?.Role || !models?.User || !order?.organizationId || !order?.id) {
+    return;
+  }
+
+  const organization = await models.Organization.findByPk(order.organizationId);
+  if (!organization) {
+    return;
+  }
+
+  const orgUsers = await organization.getUsers({
+    attributes: ['id', 'email', 'firstName', 'lastName', 'role', 'isActive'],
+    through: {
+      where: { isActive: true },
+      attributes: [],
+    },
+    include: [
+      {
+        model: models.Role,
+        as: 'roles',
+        through: { attributes: [] },
+        required: false,
+      },
+    ],
+  });
+
+  const recipients = [];
+  const seenEmails = new Set();
+  for (const user of orgUsers || []) {
+    const email = String(user?.email || '').toLowerCase().trim();
+    if (!user?.isActive || !email || seenEmails.has(email)) {
+      continue;
+    }
+    if (!hasRoleCode(user, ['administrator', 'inventorymanager'])) {
+      continue;
+    }
+    seenEmails.add(email);
+    recipients.push({
+      email,
+      name: [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || email,
+    });
+  }
+
+  if (recipients.length === 0) {
+    return;
+  }
+
+  const orderUrl = buildOrderPreviewUrl(order.id);
+  const organizationName = organization.name || organization.legalName || 'your organization';
+  const orderNumber = order.orderNumber || order.id;
+
+  await Promise.allSettled(
+    recipients.map((recipient) =>
+      sendOrderCreatedEmail({
+        toEmail: recipient.email,
+        toName: recipient.name,
+        organizationName,
+        orderNumber,
+        orderUrl,
+      })
+    )
+  );
+}
 
 function getOrderModel() {
   const models = getModels();
@@ -498,6 +580,12 @@ async function createOrder(req, res) {
           },
         ],
       });
+
+      try {
+        await notifyOrderCreated(models, createdOrder || order);
+      } catch (notifyErr) {
+        console.error('Order created email notification failed:', notifyErr);
+      }
 
       return res.status(201).json({ ok: true, data: createdOrder });
     } catch (txErr) {

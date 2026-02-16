@@ -1,5 +1,7 @@
+const crypto = require('crypto');
 const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
+const { sendOrganizationUserInviteEmail } = require('../services/email-service');
 const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
@@ -66,6 +68,50 @@ function parseBoolean(value) {
   return undefined;
 }
 
+function isRequesterSuperuser(req) {
+  const roleCodes = req.auth?.roleCodes || [];
+  return roleCodes.some((code) => String(code || '').toLowerCase() === 'superuser');
+}
+
+function parseRoleIds(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const unique = new Set();
+  for (const item of value) {
+    const roleId = String(item || '').trim();
+    if (roleId) {
+      unique.add(roleId);
+    }
+  }
+  return Array.from(unique);
+}
+
+function parseRoleCodes(value) {
+  if (!value) {
+    return [];
+  }
+  const list = Array.isArray(value) ? value : [value];
+  const unique = new Set();
+  for (const item of list) {
+    const roleCode = String(item || '').toLowerCase().trim();
+    if (roleCode) {
+      unique.add(roleCode);
+    }
+  }
+  return Array.from(unique);
+}
+
+function buildSetPasswordUrl(rawToken) {
+  const appBaseUrl = String(process.env.APP_BASE_URL || 'http://localhost').trim();
+  const resetPath = String(process.env.RESET_PASSWORD_PATH || '/reset-password').trim();
+  const safePath = resetPath.startsWith('/') ? resetPath : `/${resetPath}`;
+  const separator = safePath.includes('?') ? '&' : '?';
+  return `${appBaseUrl.replace(/\/+$/, '')}${safePath}${separator}token=${encodeURIComponent(
+    rawToken
+  )}`;
+}
+
 function sanitizeUser(user) {
   const json = user.toJSON();
   delete json.password;
@@ -74,13 +120,22 @@ function sanitizeUser(user) {
 
 async function createUser(req, res) {
   try {
-    const User = getUserModel();
-    if (!User) {
+    const models = getModels();
+    if (
+      !models ||
+      !models.User ||
+      !models.Role ||
+      !models.UserRole ||
+      !models.Token ||
+      !models.Organization
+    ) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { User, Role, UserRole, Token, Organization } = models;
 
     const payload = cleanUndefined(pickUserPayload(req.body));
-    if (!isPrivilegedRequest(req)) {
+    const requesterIsSuper = isRequesterSuperuser(req);
+    if (!requesterIsSuper) {
       payload.organizationId = getAuthenticatedOrganizationId(req);
     }
     if (payload.email) {
@@ -99,9 +154,148 @@ async function createUser(req, res) {
     if (!payload.password) {
       return res.status(400).json({ ok: false, message: 'password is required.' });
     }
+    if (!payload.organizationId) {
+      return res.status(400).json({ ok: false, message: 'organizationId is required.' });
+    }
+
+    const requestedRoleIds = parseRoleIds(req.body?.roleIds);
+    const requestedRoleCodes = parseRoleCodes(req.body?.role);
+    const resolvedRoles = [];
+
+    if (requestedRoleIds.length > 0) {
+      const rolesById = await Role.findAll({
+        where: {
+          id: requestedRoleIds,
+          isActive: true,
+        },
+      });
+      if (rolesById.length !== requestedRoleIds.length) {
+        return res.status(400).json({ ok: false, message: 'Some selected roles are invalid or inactive.' });
+      }
+      resolvedRoles.push(...rolesById);
+    }
+
+    if (requestedRoleCodes.length > 0) {
+      const rolesByCode = await Role.findAll({
+        where: {
+          code: requestedRoleCodes,
+          isActive: true,
+        },
+      });
+      for (const role of rolesByCode) {
+        if (!resolvedRoles.some((existing) => existing.id === role.id)) {
+          resolvedRoles.push(role);
+        }
+      }
+    }
+
+    const hasSuperuserRole = resolvedRoles.some(
+      (role) => String(role.code || '').toLowerCase() === 'superuser'
+    );
+    if (hasSuperuserRole && !requesterIsSuper) {
+      return res.status(403).json({
+        ok: false,
+        message: 'Only superusers can assign the SUPERUSER role.',
+      });
+    }
+    if (resolvedRoles.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'At least one role is required.',
+      });
+    }
+
+    if (resolvedRoles.length > 0) {
+      payload.role = String(resolvedRoles[0].code || payload.role || 'member')
+        .toLowerCase()
+        .trim();
+    }
 
     const user = await User.create(payload);
-    return res.status(201).json({ ok: true, data: sanitizeUser(user) });
+    if (resolvedRoles.length > 0) {
+      await UserRole.bulkCreate(
+        resolvedRoles.map((role) => ({
+          userId: user.id,
+          roleId: role.id,
+          assignedByUserId: req.auth?.userId || null,
+        })),
+        { ignoreDuplicates: true }
+      );
+    }
+
+    let inviteEmail = { sent: false, message: 'Invite email was not sent.' };
+    const normalizedEmail = String(user.email || '').toLowerCase().trim();
+    if (normalizedEmail) {
+      try {
+        const expiresInMinutes = Number(process.env.PASSWORD_RESET_EXPIRES_MINUTES || 30);
+        const expiresAt = new Date(Date.now() + expiresInMinutes * 60 * 1000);
+        const rawToken = crypto.randomBytes(48).toString('hex');
+        const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+        await Token.update(
+          {
+            isActive: false,
+            revokedAt: new Date(),
+            revokedReason: 'superseded_user_create_invite',
+          },
+          {
+            where: {
+              userId: user.id,
+              type: 'reset_password',
+              isActive: true,
+              revokedAt: null,
+            },
+          }
+        );
+
+        await Token.create({
+          userId: user.id,
+          tokenHash,
+          type: 'reset_password',
+          scope: 'user_created_invite',
+          expiresAt,
+          ipAddress: req.ip || null,
+          userAgent: req.get('user-agent') || null,
+          metadata: {
+            email: normalizedEmail,
+            organizationId: user.organizationId,
+            invitedByUserId: req.auth?.userId || null,
+          },
+          isActive: true,
+        });
+
+        const organization = await Organization.findByPk(user.organizationId, {
+          attributes: ['id', 'name', 'legalName'],
+        });
+        const setPasswordUrl = buildSetPasswordUrl(rawToken);
+
+        await sendOrganizationUserInviteEmail({
+          toEmail: normalizedEmail,
+          toName:
+            [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || normalizedEmail,
+          organizationName: organization?.name || organization?.legalName || 'your organization',
+          setPasswordUrl,
+          expiresInMinutes,
+        });
+
+        inviteEmail = { sent: true };
+      } catch (emailErr) {
+        console.error('Create user invite email error:', emailErr);
+        inviteEmail = {
+          sent: false,
+          message: 'User was created, but invite email could not be sent.',
+        };
+      }
+    }
+
+    return res.status(201).json({
+      ok: true,
+      message: 'User created successfully.',
+      data: {
+        ...sanitizeUser(user),
+        inviteEmail,
+      },
+    });
   } catch (err) {
     console.error('Create user error:', err);
     return res.status(500).json({ ok: false, message: 'Unable to create user.' });
@@ -302,8 +496,13 @@ async function listUserAssignableRoles(req, res) {
       return res.status(404).json({ ok: false, message: 'User not found.' });
     }
 
+    const whereRole = { isActive: true };
+    if (!isRequesterSuperuser(req)) {
+      whereRole.code = { [Op.ne]: 'superuser' };
+    }
+
     const roles = await Role.findAll({
-      where: { isActive: true },
+      where: whereRole,
       attributes: ['id', 'name', 'code', 'description'],
       order: [['name', 'ASC']],
     });
@@ -347,6 +546,12 @@ async function addRoleToUser(req, res) {
     const role = await Role.findOne({ where: { id: roleId, isActive: true } });
     if (!role) {
       return res.status(404).json({ ok: false, message: 'Role not found or inactive.' });
+    }
+    if (String(role.code || '').toLowerCase() === 'superuser' && !isRequesterSuperuser(req)) {
+      return res.status(403).json({
+        ok: false,
+        message: 'Only superusers can assign the SUPERUSER role.',
+      });
     }
 
     const [membership] = await UserRole.findOrCreate({

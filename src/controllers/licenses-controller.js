@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const { randomUUID } = require('crypto');
 const { getModels } = require('../sequelize');
+const { sendLicenseRevokedEmail } = require('../services/email-service');
 const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
@@ -55,6 +56,62 @@ function parseBoolean(value) {
     return false;
   }
   return undefined;
+}
+
+function buildLicensesPageUrl() {
+  const appBaseUrl = String(process.env.APP_BASE_URL || 'http://localhost').trim();
+  return `${appBaseUrl.replace(/\/+$/, '')}/licenses`;
+}
+
+async function notifyOrganizationUsersLicenseRevoked(models, license) {
+  if (!models?.Organization || !models?.User || !license?.organizationId) {
+    return;
+  }
+
+  const organization = await models.Organization.findByPk(license.organizationId);
+  if (!organization) {
+    return;
+  }
+
+  const orgUsers = await organization.getUsers({
+    attributes: ['id', 'email', 'firstName', 'lastName', 'isActive'],
+    through: {
+      where: { isActive: true },
+      attributes: [],
+    },
+  });
+
+  const recipients = [];
+  const seenEmails = new Set();
+  for (const user of orgUsers || []) {
+    const email = String(user?.email || '').toLowerCase().trim();
+    if (!user?.isActive || !email || seenEmails.has(email)) {
+      continue;
+    }
+    seenEmails.add(email);
+    recipients.push({
+      email,
+      name: [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || email,
+    });
+  }
+
+  if (recipients.length === 0) {
+    return;
+  }
+
+  const organizationName = organization.name || organization.legalName || 'your organization';
+  const licensesUrl = buildLicensesPageUrl();
+  await Promise.allSettled(
+    recipients.map((recipient) =>
+      sendLicenseRevokedEmail({
+        toEmail: recipient.email,
+        toName: recipient.name,
+        organizationName,
+        licenseKey: license.key,
+        licensesUrl,
+      })
+    )
+  );
 }
 
 async function createLicense(req, res) {
@@ -188,10 +245,11 @@ async function getLicenseById(req, res) {
 
 async function updateLicense(req, res) {
   try {
-    const License = getLicenseModel();
-    if (!License) {
+    const models = getModels();
+    if (!models || !models.License) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { License } = models;
 
     const where = { id: req.params.id };
     if (!isPrivilegedRequest(req)) {
@@ -213,7 +271,24 @@ async function updateLicense(req, res) {
       return res.status(400).json({ ok: false, message: 'No valid fields provided for update.' });
     }
 
+    const isTransitioningToRevoked =
+      String(license.status || '').toLowerCase() !== 'revoked' &&
+      String(payload.status || '').toLowerCase() === 'revoked';
+    if (isTransitioningToRevoked) {
+      payload.revokedAt = payload.revokedAt || new Date();
+      payload.isActive = false;
+    }
+
     await license.update(payload);
+
+    if (isTransitioningToRevoked) {
+      try {
+        await notifyOrganizationUsersLicenseRevoked(models, license);
+      } catch (notifyErr) {
+        console.error('License revoked email notification failed:', notifyErr);
+      }
+    }
+
     return res.status(200).json({ ok: true, data: license });
   } catch (err) {
     console.error('Update license error:', err);
@@ -250,10 +325,11 @@ async function deleteLicense(req, res) {
 
 async function revokeLicense(req, res) {
   try {
-    const License = getLicenseModel();
-    if (!License) {
+    const models = getModels();
+    if (!models || !models.License) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { License } = models;
 
     const where = { id: req.params.id };
     if (!isPrivilegedRequest(req)) {
@@ -276,6 +352,12 @@ async function revokeLicense(req, res) {
       isActive: false,
       revokedAt: new Date(),
     });
+
+    try {
+      await notifyOrganizationUsersLicenseRevoked(models, license);
+    } catch (notifyErr) {
+      console.error('License revoked email notification failed:', notifyErr);
+    }
 
     return res.status(200).json({ ok: true, message: 'License revoked successfully.', data: license });
   } catch (err) {

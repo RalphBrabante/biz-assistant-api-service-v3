@@ -2,6 +2,7 @@ const { Op, fn, col } = require('sequelize');
 const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
 const { isPrivilegedRequest } = require('../services/request-scope');
+const { sendQuarterlyExpenseReportReadyEmail } = require('../services/email-service');
 
 function getQuarterDates(year, quarter) {
   const quarterStartMonth = (quarter - 1) * 3;
@@ -37,6 +38,11 @@ function toNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function buildExpenseReportPreviewUrl(reportId) {
+  const appBaseUrl = String(process.env.APP_BASE_URL || 'http://localhost').trim();
+  return `${appBaseUrl.replace(/\/+$/, '')}/reports/${encodeURIComponent(reportId)}`;
+}
+
 function resolveOrganizationId(req, fallbackFromBody = null) {
   const authOrgId = req.auth?.user?.organizationId || null;
 
@@ -54,6 +60,87 @@ function resolveOrganizationIdForRead(req) {
     return requested || null;
   }
   return authOrgId;
+}
+
+function hasRoleCode(user, roleCodes = []) {
+  const allowed = roleCodes.map((value) => String(value || '').toLowerCase());
+  const primaryRole = String(user?.role || '').toLowerCase();
+  if (primaryRole && allowed.includes(primaryRole)) {
+    return true;
+  }
+  const memberships = Array.isArray(user?.roles) ? user.roles : [];
+  return memberships.some((role) =>
+    allowed.includes(String(role?.code || '').toLowerCase())
+  );
+}
+
+async function notifyQuarterlyExpenseReportGenerated(models, report) {
+  if (!models?.Organization || !models?.Role || !models?.User) {
+    return;
+  }
+
+  const organization = await models.Organization.findByPk(report.organizationId);
+  if (!organization) {
+    return;
+  }
+
+  const orgUsers = await organization.getUsers({
+    attributes: ['id', 'email', 'firstName', 'lastName', 'role', 'isActive'],
+    through: {
+      where: { isActive: true },
+      attributes: [],
+    },
+    include: models.Role
+      ? [
+          {
+            model: models.Role,
+            as: 'roles',
+            through: { attributes: [] },
+            required: false,
+          },
+        ]
+      : [],
+  });
+
+  const recipients = [];
+  const seenEmails = new Set();
+  for (const user of orgUsers || []) {
+    const email = String(user?.email || '').toLowerCase().trim();
+    if (!user?.isActive || !email || seenEmails.has(email)) {
+      continue;
+    }
+    if (!hasRoleCode(user, ['administrator', 'accountant'])) {
+      continue;
+    }
+    seenEmails.add(email);
+    recipients.push({
+      email,
+      name:
+        [user.firstName, user.lastName].filter(Boolean).join(' ').trim() ||
+        email,
+    });
+  }
+
+  if (recipients.length === 0) {
+    return;
+  }
+
+  const reportUrl = buildExpenseReportPreviewUrl(report.id);
+  const quarterLabel = `Q${report.quarter}`;
+  const organizationName = organization.name || organization.legalName || 'your organization';
+
+  await Promise.allSettled(
+    recipients.map((recipient) =>
+      sendQuarterlyExpenseReportReadyEmail({
+        toEmail: recipient.email,
+        toName: recipient.name,
+        organizationName,
+        quarter: quarterLabel,
+        year: report.year,
+        reportUrl,
+      })
+    )
+  );
 }
 
 async function computeQuarterlySalesInvoiceReport(req, res, next) {
@@ -280,6 +367,136 @@ async function getQuarterlySalesReportById(req, res, next) {
   }
 }
 
+async function getQuarterlySalesReportPreviewById(req, res, next) {
+  try {
+    const models = getModels();
+    if (
+      !models ||
+      !models.QuarterlySalesReport ||
+      !models.Organization ||
+      !models.SalesInvoice
+    ) {
+      return res.status(503).json({
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'Database models are not ready yet.',
+      });
+    }
+
+    const organizationId = resolveOrganizationIdForRead(req);
+    const isPrivileged = isPrivilegedRequest(req);
+    if (!isPrivileged && !organizationId) {
+      return res.status(400).json({
+        code: 'BAD_REQUEST',
+        message: 'organizationId could not be resolved from authenticated user.',
+      });
+    }
+
+    const {
+      QuarterlySalesReport,
+      Organization,
+      SalesInvoice,
+      Order,
+      Customer,
+    } = models;
+
+    const report = await QuarterlySalesReport.findOne({
+      where: {
+        id: req.params.id,
+        ...(organizationId ? { organizationId } : {}),
+      },
+      include: [
+        {
+          model: Organization,
+          as: 'organization',
+          attributes: ['id', 'name', 'legalName'],
+        },
+      ],
+    });
+
+    if (!report) {
+      return res.status(404).json({
+        code: 'NOT_FOUND',
+        message: 'Quarterly sales report not found.',
+      });
+    }
+
+    const salesInvoices = await SalesInvoice.findAll({
+      where: {
+        organizationId: report.organizationId,
+        issueDate: {
+          [Op.between]: [report.periodStart, report.periodEnd],
+        },
+        status: {
+          [Op.ne]: 'void',
+        },
+      },
+      include: [
+        Order
+          ? {
+              model: Order,
+              as: 'order',
+              attributes: ['id', 'orderNumber', 'status', 'paymentStatus'],
+              required: false,
+              include: Customer
+                ? [
+                    {
+                      model: Customer,
+                      as: 'customer',
+                      attributes: ['id', 'name', 'taxId'],
+                      required: false,
+                    },
+                  ]
+                : [],
+            }
+          : null,
+      ].filter(Boolean),
+      order: [
+        ['issueDate', 'DESC'],
+        ['createdAt', 'DESC'],
+      ],
+    });
+
+    const summary = salesInvoices.reduce(
+      (acc, invoice) => {
+        acc.invoiceCount += 1;
+        acc.amount += toNumber(invoice.amount);
+        acc.taxableAmount += toNumber(invoice.taxableAmount);
+        acc.withHoldingTaxAmount += toNumber(invoice.withHoldingTaxAmount);
+        acc.subtotalAmount += toNumber(invoice.subtotalAmount);
+        acc.taxAmount += toNumber(invoice.taxAmount);
+        acc.discountAmount += toNumber(invoice.discountAmount);
+        acc.totalAmount += toNumber(invoice.totalAmount);
+        return acc;
+      },
+      {
+        invoiceCount: 0,
+        amount: 0,
+        taxableAmount: 0,
+        withHoldingTaxAmount: 0,
+        subtotalAmount: 0,
+        taxAmount: 0,
+        discountAmount: 0,
+        totalAmount: 0,
+      }
+    );
+
+    return res.status(200).json({
+      code: 'SUCCESS',
+      message: 'Quarterly sales report preview fetched successfully.',
+      data: {
+        report,
+        summary: {
+          ...summary,
+          currency: report.currency,
+        },
+        salesInvoices,
+      },
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 async function deleteQuarterlySalesReport(req, res, next) {
   try {
     const models = getModels();
@@ -414,6 +631,13 @@ async function computeQuarterlyExpenseReport(req, res, next) {
     }
 
     const savedReport = await QuarterlyExpenseReport.findByPk(report.id);
+    if (savedReport) {
+      try {
+        await notifyQuarterlyExpenseReportGenerated(models, savedReport);
+      } catch (emailErr) {
+        console.error('Quarterly expense report email notification error:', emailErr);
+      }
+    }
 
     return res.status(created ? 201 : 200).json({
       code: created ? 'CREATED' : 'SUCCESS',
@@ -549,6 +773,143 @@ async function getQuarterlyExpenseReportById(req, res, next) {
   }
 }
 
+async function getQuarterlyExpenseReportPreviewById(req, res, next) {
+  try {
+    const models = getModels();
+    if (
+      !models ||
+      !models.QuarterlyExpenseReport ||
+      !models.Organization ||
+      !models.Expense
+    ) {
+      return res.status(503).json({
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'Database models are not ready yet.',
+      });
+    }
+
+    const organizationId = resolveOrganizationIdForRead(req);
+    const isPrivileged = isPrivilegedRequest(req);
+    if (!isPrivileged && !organizationId) {
+      return res.status(400).json({
+        code: 'BAD_REQUEST',
+        message: 'organizationId could not be resolved from authenticated user.',
+      });
+    }
+
+    const {
+      QuarterlyExpenseReport,
+      Organization,
+      Expense,
+      Vendor,
+      TaxType,
+      WithholdingTaxType,
+    } = models;
+
+    const report = await QuarterlyExpenseReport.findOne({
+      where: {
+        id: req.params.id,
+        ...(organizationId ? { organizationId } : {}),
+      },
+      include: [
+        {
+          model: Organization,
+          as: 'organization',
+          attributes: ['id', 'name', 'legalName'],
+        },
+      ],
+    });
+
+    if (!report) {
+      return res.status(404).json({
+        code: 'NOT_FOUND',
+        message: 'Quarterly expense report not found.',
+      });
+    }
+
+    const expenses = await Expense.findAll({
+      where: {
+        organizationId: report.organizationId,
+        expenseDate: {
+          [Op.between]: [report.periodStart, report.periodEnd],
+        },
+        status: {
+          [Op.ne]: 'cancelled',
+        },
+      },
+      include: [
+        Vendor
+          ? {
+              model: Vendor,
+              as: 'vendor',
+              attributes: ['id', 'name', 'legalName', 'taxId'],
+              required: false,
+            }
+          : null,
+        TaxType
+          ? {
+              model: TaxType,
+              as: 'taxType',
+              attributes: ['id', 'code', 'name', 'percentage'],
+              required: false,
+            }
+          : null,
+        WithholdingTaxType
+          ? {
+              model: WithholdingTaxType,
+              as: 'withholdingTaxType',
+              attributes: ['id', 'name', 'percentage'],
+              required: false,
+            }
+          : null,
+      ].filter(Boolean),
+      order: [
+        ['expenseDate', 'DESC'],
+        ['createdAt', 'DESC'],
+      ],
+    });
+
+    const summary = expenses.reduce(
+      (acc, expense) => {
+        acc.expenseCount += 1;
+        acc.amount += toNumber(expense.amount);
+        acc.taxableAmount += toNumber(expense.taxableAmount);
+        acc.taxAmount += toNumber(expense.taxAmount);
+        acc.vatExemptAmount += toNumber(expense.vatExemptAmount);
+        acc.withHoldingTaxAmount += toNumber(expense.withHoldingTaxAmount);
+        acc.discountAmount += toNumber(expense.discountAmount);
+        acc.totalAmount += toNumber(expense.totalAmount);
+        return acc;
+      },
+      {
+        expenseCount: 0,
+        amount: 0,
+        taxableAmount: 0,
+        taxAmount: 0,
+        vatExemptAmount: 0,
+        withHoldingTaxAmount: 0,
+        discountAmount: 0,
+        totalAmount: 0,
+      }
+    );
+
+    return res.status(200).json({
+      code: 'SUCCESS',
+      message: 'Quarterly expense report preview fetched successfully.',
+      data: {
+        report,
+        summary: {
+          ...summary,
+          currency: report.currency,
+        },
+        expenses,
+      },
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 async function deleteQuarterlyExpenseReport(req, res, next) {
   try {
     const models = getModels();
@@ -598,9 +959,11 @@ module.exports = {
   computeQuarterlySalesInvoiceReport,
   listQuarterlySalesReports,
   getQuarterlySalesReportById,
+  getQuarterlySalesReportPreviewById,
   deleteQuarterlySalesReport,
   computeQuarterlyExpenseReport,
   listQuarterlyExpenseReports,
   getQuarterlyExpenseReportById,
+  getQuarterlyExpenseReportPreviewById,
   deleteQuarterlyExpenseReport,
 };
