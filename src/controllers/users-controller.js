@@ -109,10 +109,11 @@ async function createUser(req, res) {
 
 async function listUsers(req, res) {
   try {
-    const User = getUserModel();
-    if (!User) {
+    const models = getModels();
+    if (!models || !models.User || !models.Organization) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { User, Organization } = models;
 
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
@@ -149,6 +150,14 @@ async function listUsers(req, res) {
 
     const { rows, count } = await User.findAndCountAll({
       where,
+      include: [
+        {
+          model: Organization,
+          as: 'primaryOrganization',
+          attributes: ['id', 'name', 'legalName'],
+          required: false,
+        },
+      ],
       limit,
       offset,
       order: [['createdAt', 'DESC']],

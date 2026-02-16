@@ -1,4 +1,5 @@
 const { Op } = require('sequelize');
+const { parse } = require('csv-parse/sync');
 const { getModels } = require('../sequelize');
 const {
   isPrivilegedRequest,
@@ -59,6 +60,239 @@ function parseBoolean(value) {
     return false;
   }
   return undefined;
+}
+
+function csvValue(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const str = String(value);
+  if (str.includes('"') || str.includes(',') || str.includes('\n')) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function toNullableNumber(value) {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function resolveImportOrganizationId(req) {
+  if (!isPrivilegedRequest(req)) {
+    return getAuthenticatedOrganizationId(req);
+  }
+  return req.body?.organizationId || req.query?.organizationId || getAuthenticatedOrganizationId(req);
+}
+
+async function importCustomers(req, res) {
+  try {
+    const models = getCustomerModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ ok: false, message: 'CSV file is required.' });
+    }
+
+    const records = parse(req.file.buffer.toString('utf-8'), {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+    });
+
+    if (!Array.isArray(records) || records.length === 0) {
+      return res.status(400).json({ ok: false, message: 'CSV file has no rows to import.' });
+    }
+
+    const { Customer } = models;
+    const organizationId = resolveImportOrganizationId(req);
+
+    if (!organizationId) {
+      return res.status(400).json({ ok: false, message: 'organizationId is required.' });
+    }
+
+    let imported = 0;
+    let skipped = 0;
+    const errors = [];
+
+    for (let index = 0; index < records.length; index += 1) {
+      const row = records[index];
+      const rowNum = index + 2;
+      const name = String(row.name || '').trim();
+      const taxId = String(row.taxId || '').trim();
+      if (!name || !taxId) {
+        skipped += 1;
+        errors.push(`Row ${rowNum}: name and taxId are required.`);
+        continue;
+      }
+
+      const payload = cleanUndefined({
+        organizationId,
+        customerCode: String(row.customerCode || '').trim() || undefined,
+        type: String(row.type || '').trim() || 'business',
+        name,
+        legalName: String(row.legalName || '').trim() || undefined,
+        taxId,
+        contactPerson: String(row.contactPerson || '').trim() || undefined,
+        email: String(row.email || '').trim().toLowerCase() || undefined,
+        phone: String(row.phone || '').trim() || undefined,
+        mobile: String(row.mobile || '').trim() || undefined,
+        addressLine1: String(row.addressLine1 || '').trim() || undefined,
+        addressLine2: String(row.addressLine2 || '').trim() || undefined,
+        city: String(row.city || '').trim() || undefined,
+        state: String(row.state || '').trim() || undefined,
+        postalCode: String(row.postalCode || '').trim() || undefined,
+        country: String(row.country || '').trim() || undefined,
+        creditLimit: toNullableNumber(row.creditLimit),
+        paymentTermsDays: toNullableNumber(row.paymentTermsDays),
+        status: String(row.status || '').trim().toLowerCase() || 'active',
+        notes: String(row.notes || '').trim() || undefined,
+        isActive: parseBoolean(row.isActive) ?? true,
+        createdBy: req.auth?.user?.id || null,
+        updatedBy: req.auth?.user?.id || null,
+      });
+
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await Customer.create(payload);
+        imported += 1;
+      } catch (rowErr) {
+        skipped += 1;
+        errors.push(`Row ${rowNum}: ${rowErr.message || 'failed to import row.'}`);
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      message: `Customer import complete. Imported ${imported}, skipped ${skipped}.`,
+      data: {
+        imported,
+        skipped,
+        totalRows: records.length,
+        errors,
+      },
+    });
+  } catch (err) {
+    console.error('Import customers error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to import customers.' });
+  }
+}
+
+async function exportCustomers(req, res) {
+  try {
+    const models = getCustomerModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    const { Customer } = models;
+    const where = {};
+
+    if (req.query.organizationId) where.organizationId = req.query.organizationId;
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(400).json({ ok: false, message: 'organizationId is required for this user.' });
+      }
+    }
+    if (req.query.type) where.type = req.query.type;
+    if (req.query.status) where.status = req.query.status;
+
+    const isActive = parseBoolean(req.query.isActive);
+    if (isActive !== undefined) {
+      where.isActive = isActive;
+    }
+
+    if (req.query.q) {
+      where[Op.or] = [
+        { name: { [Op.like]: `%${req.query.q}%` } },
+        { legalName: { [Op.like]: `%${req.query.q}%` } },
+        { taxId: { [Op.like]: `%${req.query.q}%` } },
+        { customerCode: { [Op.like]: `%${req.query.q}%` } },
+        { email: { [Op.like]: `%${req.query.q}%` } },
+        { contactPerson: { [Op.like]: `%${req.query.q}%` } },
+      ];
+    }
+
+    const rows = await Customer.findAll({
+      where,
+      order: [['createdAt', 'DESC']],
+      limit: 10000,
+    });
+
+    const headers = [
+      'id',
+      'organizationId',
+      'customerCode',
+      'type',
+      'name',
+      'legalName',
+      'taxId',
+      'contactPerson',
+      'email',
+      'phone',
+      'mobile',
+      'addressLine1',
+      'addressLine2',
+      'city',
+      'state',
+      'postalCode',
+      'country',
+      'creditLimit',
+      'paymentTermsDays',
+      'status',
+      'isActive',
+      'notes',
+      'createdAt',
+      'updatedAt',
+    ];
+    const lines = [headers.join(',')];
+    for (const row of rows) {
+      const json = row.toJSON();
+      lines.push(
+        [
+          csvValue(json.id),
+          csvValue(json.organizationId),
+          csvValue(json.customerCode),
+          csvValue(json.type),
+          csvValue(json.name),
+          csvValue(json.legalName),
+          csvValue(json.taxId),
+          csvValue(json.contactPerson),
+          csvValue(json.email),
+          csvValue(json.phone),
+          csvValue(json.mobile),
+          csvValue(json.addressLine1),
+          csvValue(json.addressLine2),
+          csvValue(json.city),
+          csvValue(json.state),
+          csvValue(json.postalCode),
+          csvValue(json.country),
+          csvValue(json.creditLimit),
+          csvValue(json.paymentTermsDays),
+          csvValue(json.status),
+          csvValue(json.isActive),
+          csvValue(json.notes),
+          csvValue(json.createdAt),
+          csvValue(json.updatedAt),
+        ].join(',')
+      );
+    }
+
+    const csv = lines.join('\n');
+    const date = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=\"customers-${date}.csv\"`);
+    return res.status(200).send(csv);
+  } catch (err) {
+    console.error('Export customers error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to export customers.' });
+  }
 }
 
 async function createCustomer(req, res) {
@@ -283,6 +517,8 @@ async function deleteCustomer(req, res) {
 
 module.exports = {
   createCustomer,
+  importCustomers,
+  exportCustomers,
   listCustomers,
   getCustomerById,
   updateCustomer,

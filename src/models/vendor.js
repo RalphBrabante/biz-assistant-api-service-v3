@@ -57,6 +57,14 @@ function initVendorModel(sequelize) {
         type: DataTypes.STRING(100),
         allowNull: true,
       },
+      barangay: {
+        type: DataTypes.STRING(120),
+        allowNull: true,
+      },
+      province: {
+        type: DataTypes.STRING(120),
+        allowNull: true,
+      },
       postalCode: {
         type: DataTypes.STRING(20),
         allowNull: true,

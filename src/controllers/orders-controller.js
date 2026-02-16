@@ -61,7 +61,7 @@ function toFixed3(value) {
   return Number(normalizeNumber(value).toFixed(3));
 }
 
-function buildSnapshotFromItem(item, orderedItem = {}) {
+function buildSnapshotFromItem(item, orderedItem = {}, vatRate = 0) {
   const quantity = toFixed3(orderedItem.quantity || 1);
   const unitPrice = toFixed2(item.price);
   const discountedUnitPrice =
@@ -70,11 +70,17 @@ function buildSnapshotFromItem(item, orderedItem = {}) {
       : toFixed2(item.discountedPrice);
   const effectiveUnitPrice =
     discountedUnitPrice !== null ? discountedUnitPrice : unitPrice;
-  const taxRate = toFixed2(item.taxRate || 0);
+  const taxRate = toFixed2(vatRate || 0);
   const lineSubtotal = toFixed2(unitPrice * quantity);
   const lineDiscount = toFixed2((unitPrice - effectiveUnitPrice) * quantity);
-  const lineTax = toFixed2((effectiveUnitPrice * quantity * taxRate) / 100);
-  const lineTotal = toFixed2(effectiveUnitPrice * quantity + lineTax);
+  const lineGross = toFixed2(effectiveUnitPrice * quantity);
+  const lineTaxableAmount = taxRate > 0
+    ? toFixed2(lineGross / (1 + taxRate / 100))
+    : lineGross;
+  const lineTax = taxRate > 0
+    ? toFixed2(lineTaxableAmount * (taxRate / 100))
+    : 0;
+  const lineTotal = lineGross;
 
   return {
     itemId: item.id,
@@ -93,6 +99,32 @@ function buildSnapshotFromItem(item, orderedItem = {}) {
     lineTax,
     lineTotal,
     metadata: orderedItem.metadata || null,
+  };
+}
+
+function computeOrderTotals(snapshotRows = [], shippingAmount = 0, vatRate = 0) {
+  const subtotalAmount = toFixed2(
+    snapshotRows.reduce((sum, row) => sum + normalizeNumber(row.lineTotal), 0)
+  );
+  const discountAmount = toFixed2(
+    snapshotRows.reduce((sum, row) => sum + normalizeNumber(row.lineDiscount), 0)
+  );
+  const taxableAmount = vatRate > 0
+    ? toFixed2(subtotalAmount / (1 + vatRate / 100))
+    : subtotalAmount;
+  const taxAmount = vatRate > 0
+    ? toFixed2(taxableAmount * (vatRate / 100))
+    : 0;
+  const safeShipping = toFixed2(shippingAmount);
+  const totalAmount = toFixed2(subtotalAmount + safeShipping);
+
+  return {
+    subtotalAmount,
+    taxableAmount,
+    taxAmount,
+    discountAmount,
+    shippingAmount: safeShipping,
+    totalAmount,
   };
 }
 
@@ -157,11 +189,11 @@ function isStockValidationError(err) {
 async function createOrder(req, res) {
   try {
     const models = getModels();
-    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Item || !models.Customer) {
+    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Item || !models.Customer || !models.Organization) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const { Order, OrderItemSnapshot, Item, Customer } = models;
+    const { Order, OrderItemSnapshot, Item, Customer, Organization } = models;
     const payload = cleanUndefined(pickOrderPayload(req.body));
     const orderedItems = Array.isArray(req.body.orderedItems)
       ? req.body.orderedItems
@@ -231,11 +263,37 @@ async function createOrder(req, res) {
       }
 
       const itemById = new Map(items.map((item) => [item.id, item]));
+      const organization = await Organization.findByPk(payload.organizationId, {
+        include: [
+          {
+            association: 'taxType',
+            attributes: ['id', 'percentage', 'isActive'],
+            required: false,
+          },
+        ],
+        transaction,
+      });
+      if (!organization || !organization.taxTypeId || !organization.taxType || organization.taxType.isActive === false) {
+        await transaction.rollback();
+        return res.status(400).json({
+          ok: false,
+          message: 'Organization tax type is required and must be active before creating orders.',
+        });
+      }
+      const vatRate = Number(organization.taxType.percentage || 0);
+
       const snapshotRows = orderedItems.map((entry) =>
-        buildSnapshotFromItem(itemById.get(entry.itemId), entry)
+        buildSnapshotFromItem(itemById.get(entry.itemId), entry, vatRate)
       );
       const stockDemand = buildStockDemand(orderedItems, itemById);
       ensureStockAvailable(itemById, stockDemand);
+
+      const computedTotals = computeOrderTotals(snapshotRows, payload.shippingAmount || 0, vatRate);
+      payload.subtotalAmount = computedTotals.subtotalAmount;
+      payload.taxAmount = computedTotals.taxAmount;
+      payload.discountAmount = computedTotals.discountAmount;
+      payload.shippingAmount = computedTotals.shippingAmount;
+      payload.totalAmount = computedTotals.totalAmount;
 
       const order = await Order.create(payload, { transaction });
 
@@ -284,10 +342,10 @@ async function createOrder(req, res) {
 async function listOrders(req, res) {
   try {
     const models = getModels();
-    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Customer) {
+    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Customer || !models.Organization) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { Order, OrderItemSnapshot, Customer } = models;
+    const { Order, OrderItemSnapshot, Customer, Organization } = models;
 
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
@@ -318,6 +376,12 @@ async function listOrders(req, res) {
       limit,
       offset,
       include: [
+        {
+          model: Organization,
+          as: 'organization',
+          attributes: ['id', 'name', 'legalName'],
+          required: false,
+        },
         {
           model: Customer,
           as: 'customer',
@@ -397,11 +461,12 @@ async function updateOrder(req, res) {
       !models.Customer ||
       !models.OrderItemSnapshot ||
       !models.Item ||
-      !models.SalesInvoice
+      !models.SalesInvoice ||
+      !models.Organization
     ) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { Order, Customer, OrderItemSnapshot, Item, SalesInvoice } = models;
+    const { Order, Customer, OrderItemSnapshot, Item, SalesInvoice, Organization } = models;
 
     const where = { id: req.params.id };
     if (!isPrivilegedRequest(req)) {
@@ -518,12 +583,47 @@ async function updateOrder(req, res) {
           });
         }
 
+        const organization = await Organization.findByPk(order.organizationId, {
+          include: [
+            {
+              association: 'taxType',
+              attributes: ['id', 'percentage', 'isActive'],
+              required: false,
+            },
+          ],
+          transaction,
+        });
+        if (!organization || !organization.taxTypeId || !organization.taxType || organization.taxType.isActive === false) {
+          await transaction.rollback();
+          return res.status(400).json({
+            ok: false,
+            message: 'Organization tax type is required and must be active before updating orders.',
+          });
+        }
+        const vatRate = Number(organization.taxType.percentage || 0);
+
         const itemById = new Map(items.map((item) => [item.id, item]));
         const snapshotRows = orderedItems.map((entry) =>
-          buildSnapshotFromItem(itemById.get(entry.itemId), entry)
+          buildSnapshotFromItem(itemById.get(entry.itemId), entry, vatRate)
         );
         const stockDemand = buildStockDemand(orderedItems, itemById);
         ensureStockAvailable(itemById, stockDemand);
+
+        const computedTotals = computeOrderTotals(
+          snapshotRows,
+          payload.shippingAmount !== undefined ? payload.shippingAmount : order.shippingAmount,
+          vatRate
+        );
+        await order.update(
+          {
+            subtotalAmount: computedTotals.subtotalAmount,
+            taxAmount: computedTotals.taxAmount,
+            discountAmount: computedTotals.discountAmount,
+            shippingAmount: computedTotals.shippingAmount,
+            totalAmount: computedTotals.totalAmount,
+          },
+          { transaction }
+        );
 
         await OrderItemSnapshot.destroy({
           where: { orderId: order.id },
@@ -541,6 +641,44 @@ async function updateOrder(req, res) {
         if (shouldApplyStockOnConfirm) {
           await applyStockDeduction(itemById, stockDemand, transaction);
         }
+      } else if (payload.shippingAmount !== undefined) {
+        const organization = await Organization.findByPk(order.organizationId, {
+          include: [
+            {
+              association: 'taxType',
+              attributes: ['id', 'percentage', 'isActive'],
+              required: false,
+            },
+          ],
+          transaction,
+        });
+        if (!organization || !organization.taxTypeId || !organization.taxType || organization.taxType.isActive === false) {
+          await transaction.rollback();
+          return res.status(400).json({
+            ok: false,
+            message: 'Organization tax type is required and must be active before updating orders.',
+          });
+        }
+        const vatRate = Number(organization.taxType.percentage || 0);
+        const existingSnapshots = await OrderItemSnapshot.findAll({
+          where: { orderId: order.id },
+          transaction,
+        });
+        const computedTotals = computeOrderTotals(
+          existingSnapshots.map((row) => row.toJSON()),
+          payload.shippingAmount,
+          vatRate
+        );
+        await order.update(
+          {
+            subtotalAmount: computedTotals.subtotalAmount,
+            taxAmount: computedTotals.taxAmount,
+            discountAmount: computedTotals.discountAmount,
+            shippingAmount: computedTotals.shippingAmount,
+            totalAmount: computedTotals.totalAmount,
+          },
+          { transaction }
+        );
       } else if (shouldApplyStockOnConfirm) {
         const currentSnapshots = await OrderItemSnapshot.findAll({
           where: { orderId: order.id },

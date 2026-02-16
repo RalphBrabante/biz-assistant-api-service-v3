@@ -8,10 +8,13 @@ const {
 
 function getOrganizationModel() {
   const models = getModels();
-  if (!models || !models.Organization) {
+  if (!models || !models.Organization || !models.TaxType) {
     return null;
   }
-  return models.Organization;
+  return {
+    Organization: models.Organization,
+    TaxType: models.TaxType,
+  };
 }
 
 function getOrganizationMembershipModels() {
@@ -40,6 +43,7 @@ function pickOrganizationPayload(body = {}) {
     postalCode: body.postalCode,
     country: body.country,
     currency: body.currency,
+    taxTypeId: body.taxTypeId,
     contactEmail: body.contactEmail,
     phone: body.phone,
     website: body.website,
@@ -75,10 +79,11 @@ function sanitizeUser(user) {
 
 async function createOrganization(req, res) {
   try {
-    const Organization = getOrganizationModel();
-    if (!Organization) {
+    const orgModels = getOrganizationModel();
+    if (!orgModels) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { Organization, TaxType } = orgModels;
 
     const payload = cleanUndefined(pickOrganizationPayload(req.body));
 
@@ -95,6 +100,18 @@ async function createOrganization(req, res) {
       payload.country = 'United States';
     }
     payload.currency = String(payload.currency || 'USD').toUpperCase().slice(0, 3) || 'USD';
+    if (!payload.taxTypeId) {
+      return res.status(400).json({ ok: false, message: 'taxTypeId is required.' });
+    }
+    const taxType = await TaxType.findOne({
+      where: {
+        id: payload.taxTypeId,
+        isActive: true,
+      },
+    });
+    if (!taxType) {
+      return res.status(400).json({ ok: false, message: 'taxTypeId is invalid.' });
+    }
     if (!payload.contactEmail) {
       return res.status(400).json({ ok: false, message: 'contactEmail is required.' });
     }
@@ -103,7 +120,16 @@ async function createOrganization(req, res) {
     }
 
     const organization = await Organization.create(payload);
-    return res.status(201).json({ ok: true, data: organization });
+    const created = await Organization.findByPk(organization.id, {
+      include: [
+        {
+          association: 'taxType',
+          attributes: ['id', 'code', 'name', 'percentage'],
+          required: false,
+        },
+      ],
+    });
+    return res.status(201).json({ ok: true, data: created || organization });
   } catch (err) {
     console.error('Create organization error:', err);
     return res.status(500).json({ ok: false, message: 'Unable to create organization.' });
@@ -112,10 +138,11 @@ async function createOrganization(req, res) {
 
 async function listOrganizations(req, res) {
   try {
-    const Organization = getOrganizationModel();
-    if (!Organization) {
+    const orgModels = getOrganizationModel();
+    if (!orgModels) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { Organization } = orgModels;
 
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
@@ -147,6 +174,13 @@ async function listOrganizations(req, res) {
 
     const { rows, count } = await Organization.findAndCountAll({
       where,
+      include: [
+        {
+          association: 'taxType',
+          attributes: ['id', 'code', 'name', 'percentage'],
+          required: false,
+        },
+      ],
       limit,
       offset,
       order: [['createdAt', 'DESC']],
@@ -170,16 +204,25 @@ async function listOrganizations(req, res) {
 
 async function getOrganizationById(req, res) {
   try {
-    const Organization = getOrganizationModel();
-    if (!Organization) {
+    const orgModels = getOrganizationModel();
+    if (!orgModels) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { Organization } = orgModels;
 
     if (!assertOrganizationAccess(req, req.params.id)) {
       return res.status(404).json({ ok: false, message: 'Organization not found.' });
     }
 
-    const organization = await Organization.findByPk(req.params.id);
+    const organization = await Organization.findByPk(req.params.id, {
+      include: [
+        {
+          association: 'taxType',
+          attributes: ['id', 'code', 'name', 'percentage'],
+          required: false,
+        },
+      ],
+    });
     if (!organization) {
       return res.status(404).json({ ok: false, message: 'Organization not found.' });
     }
@@ -463,10 +506,11 @@ async function removeUserFromOrganization(req, res) {
 
 async function updateOrganization(req, res) {
   try {
-    const Organization = getOrganizationModel();
-    if (!Organization) {
+    const orgModels = getOrganizationModel();
+    if (!orgModels) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { Organization, TaxType } = orgModels;
 
     if (!assertOrganizationAccess(req, req.params.id)) {
       return res.status(404).json({ ok: false, message: 'Organization not found.' });
@@ -484,9 +528,31 @@ async function updateOrganization(req, res) {
     if (payload.currency !== undefined) {
       payload.currency = String(payload.currency || 'USD').toUpperCase().slice(0, 3) || 'USD';
     }
+    const resolvedTaxTypeId = payload.taxTypeId || organization.taxTypeId;
+    if (!resolvedTaxTypeId) {
+      return res.status(400).json({ ok: false, message: 'taxTypeId is required.' });
+    }
+    const taxType = await TaxType.findOne({
+      where: {
+        id: resolvedTaxTypeId,
+        isActive: true,
+      },
+    });
+    if (!taxType) {
+      return res.status(400).json({ ok: false, message: 'taxTypeId is invalid.' });
+    }
 
     await organization.update(payload);
-    return res.status(200).json({ ok: true, data: organization });
+    const updated = await Organization.findByPk(organization.id, {
+      include: [
+        {
+          association: 'taxType',
+          attributes: ['id', 'code', 'name', 'percentage'],
+          required: false,
+        },
+      ],
+    });
+    return res.status(200).json({ ok: true, data: updated || organization });
   } catch (err) {
     console.error('Update organization error:', err);
     return res.status(500).json({ ok: false, message: 'Unable to update organization.' });
@@ -495,10 +561,11 @@ async function updateOrganization(req, res) {
 
 async function deleteOrganization(req, res) {
   try {
-    const Organization = getOrganizationModel();
-    if (!Organization) {
+    const orgModels = getOrganizationModel();
+    if (!orgModels) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { Organization } = orgModels;
 
     if (!assertOrganizationAccess(req, req.params.id)) {
       return res.status(404).json({ ok: false, message: 'Organization not found.' });

@@ -52,6 +52,10 @@ function initOrganizationModel(sequelize) {
         allowNull: false,
         defaultValue: 'USD',
       },
+      taxTypeId: {
+        type: DataTypes.UUID,
+        allowNull: true,
+      },
       contactEmail: {
         type: DataTypes.STRING(255),
         allowNull: false,
@@ -101,6 +105,7 @@ function initOrganizationModel(sequelize) {
       indexes: [
         { fields: ['name'] },
         { fields: ['contact_email'] },
+        { fields: ['tax_type_id'] },
       ],
     }
   );

@@ -16,7 +16,7 @@ function initExpenseModel(sequelize) {
       },
       vendorId: {
         type: DataTypes.UUID,
-        allowNull: false,
+        allowNull: true,
       },
       vendorTaxId: {
         type: DataTypes.STRING(64),
@@ -30,6 +30,20 @@ function initExpenseModel(sequelize) {
         type: DataTypes.DECIMAL(12, 2),
         allowNull: false,
         defaultValue: 0.0,
+      },
+      taxableAmount: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: false,
+        defaultValue: 0.0,
+      },
+      withHoldingTaxAmount: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: false,
+        defaultValue: 0.0,
+      },
+      withholdingTaxTypeId: {
+        type: DataTypes.UUID,
+        allowNull: true,
       },
       category: {
         type: DataTypes.STRING(120),
@@ -72,6 +86,10 @@ function initExpenseModel(sequelize) {
         allowNull: false,
         defaultValue: 0.0,
       },
+      taxTypeId: {
+        type: DataTypes.UUID,
+        allowNull: true,
+      },
       discountAmount: {
         type: DataTypes.DECIMAL(12, 2),
         allowNull: false,
@@ -83,6 +101,10 @@ function initExpenseModel(sequelize) {
         defaultValue: 0.0,
       },
       receiptUrl: {
+        type: DataTypes.STRING(500),
+        allowNull: true,
+      },
+      file: {
         type: DataTypes.STRING(500),
         allowNull: true,
       },
@@ -118,6 +140,9 @@ function initExpenseModel(sequelize) {
         { fields: ['organization_id'] },
         { fields: ['vendor_id'] },
         { fields: ['vendor_tax_id'] },
+        { fields: ['taxable_amount'] },
+        { fields: ['tax_type_id'] },
+        { fields: ['withholding_tax_type_id'] },
         { fields: ['status'] },
         { fields: ['expense_date'] },
         { fields: ['due_date'] },

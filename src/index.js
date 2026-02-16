@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const Redis = require('ioredis');
 const amqp = require('amqplib');
 const { authenticateSequelize } = require('./sequelize');
@@ -17,6 +18,8 @@ const expensesRoutes = require('./routes/expenses-routes');
 const vendorsRoutes = require('./routes/vendors-routes');
 const reportsRoutes = require('./routes/reports-routes');
 const settingsRoutes = require('./routes/settings-routes');
+const taxTypesRoutes = require('./routes/tax-types-routes');
+const withholdingTaxTypesRoutes = require('./routes/withholding-tax-types-routes');
 const devRoutes = require('./routes/dev-routes');
 const { authenticateRequest } = require('./middleware/authz');
 const {
@@ -37,6 +40,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(express.json());
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use(errorResponseShapeMiddleware);
 
 let sequelize;
@@ -107,6 +111,8 @@ app.use('/api/v1/expenses', expensesRoutes);
 app.use('/api/v1/vendors', vendorsRoutes);
 app.use('/api/v1/reports', reportsRoutes);
 app.use('/api/v1/settings', settingsRoutes);
+app.use('/api/v1/tax-types', taxTypesRoutes);
+app.use('/api/v1/withholding-tax-types', withholdingTaxTypesRoutes);
 app.use('/api/v1', systemRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);

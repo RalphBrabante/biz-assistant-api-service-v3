@@ -28,6 +28,7 @@ const {
   initWithholdingTaxTypeModel,
   WithholdingTaxType,
 } = require('./withholding-tax-type');
+const { initTaxTypeModel, TaxType } = require('./tax-type');
 const {
   initOrderItemSnapshotModel,
   OrderItemSnapshot,
@@ -61,6 +62,7 @@ function initModels(sequelize) {
   initExpenseModel(sequelize);
   initCustomerModel(sequelize);
   initWithholdingTaxTypeModel(sequelize);
+  initTaxTypeModel(sequelize);
   initOrderItemSnapshotModel(sequelize);
   initQuarterlySalesReportModel(sequelize);
   initQuarterlyExpenseReportModel(sequelize);
@@ -780,6 +782,46 @@ function initModels(sequelize) {
     as: 'vendor',
   });
 
+  TaxType.hasMany(Expense, {
+    foreignKey: {
+      name: 'taxTypeId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'expenses',
+  });
+
+  Expense.belongsTo(TaxType, {
+    foreignKey: {
+      name: 'taxTypeId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'taxType',
+  });
+
+  TaxType.hasMany(Organization, {
+    foreignKey: {
+      name: 'taxTypeId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'RESTRICT',
+    as: 'organizations',
+  });
+
+  Organization.belongsTo(TaxType, {
+    foreignKey: {
+      name: 'taxTypeId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'RESTRICT',
+    as: 'taxType',
+  });
+
   User.hasMany(Expense, {
     foreignKey: {
       name: 'approvedBy',
@@ -960,6 +1002,26 @@ function initModels(sequelize) {
     as: 'updater',
   });
 
+  WithholdingTaxType.hasMany(Expense, {
+    foreignKey: {
+      name: 'withholdingTaxTypeId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'expenses',
+  });
+
+  Expense.belongsTo(WithholdingTaxType, {
+    foreignKey: {
+      name: 'withholdingTaxTypeId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'withholdingTaxType',
+  });
+
   Organization.hasMany(QuarterlySalesReport, {
     foreignKey: {
       name: 'organizationId',
@@ -1079,6 +1141,7 @@ function initModels(sequelize) {
     Expense,
     Customer,
     WithholdingTaxType,
+    TaxType,
     OrderItemSnapshot,
     QuarterlySalesReport,
     QuarterlyExpenseReport,

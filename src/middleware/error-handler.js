@@ -4,6 +4,7 @@ const {
   ForeignKeyConstraintError,
   DatabaseError,
 } = require('sequelize');
+const { MulterError } = require('multer');
 const { AppError } = require('../utils/app-error');
 
 function statusToCode(status) {
@@ -155,6 +156,23 @@ function errorHandler(err, req, res, next) {
   if (err instanceof AppError) {
     return res.status(err.status).json({
       code: err.code,
+      message: err.message,
+    });
+  }
+
+  if (err instanceof MulterError) {
+    const isSizeError = err.code === 'LIMIT_FILE_SIZE';
+    return res.status(400).json({
+      code: 'BAD_REQUEST',
+      message: isSizeError
+        ? 'Uploaded file is too large. Maximum file size is 10MB.'
+        : 'Invalid file upload request.',
+    });
+  }
+
+  if (err && typeof err.message === 'string' && err.message.includes('Only image files are allowed')) {
+    return res.status(400).json({
+      code: 'BAD_REQUEST',
       message: err.message,
     });
   }
