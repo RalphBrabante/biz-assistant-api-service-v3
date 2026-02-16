@@ -16,7 +16,7 @@ function initSalesInvoiceModel(sequelize) {
       },
       orderId: {
         type: DataTypes.UUID,
-        allowNull: false,
+        allowNull: true,
       },
       invoiceNumber: {
         type: DataTypes.STRING(100),
@@ -44,6 +44,21 @@ function initSalesInvoiceModel(sequelize) {
         type: DataTypes.STRING(3),
         allowNull: false,
         defaultValue: 'USD',
+      },
+      amount: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: false,
+        defaultValue: 0.0,
+      },
+      taxableAmount: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: false,
+        defaultValue: 0.0,
+      },
+      withHoldingTaxAmount: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: false,
+        defaultValue: 0.0,
       },
       subtotalAmount: {
         type: DataTypes.DECIMAL(12, 2),

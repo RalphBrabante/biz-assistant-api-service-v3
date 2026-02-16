@@ -45,6 +45,11 @@ function initItemModel(sequelize) {
         allowNull: false,
         defaultValue: 0.0,
       },
+      cost: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: false,
+        defaultValue: 0.0,
+      },
       discountedPrice: {
         type: DataTypes.DECIMAL(12, 2),
         allowNull: true,

@@ -1,4 +1,5 @@
 const { Op } = require('sequelize');
+const { parse } = require('csv-parse/sync');
 const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
 const {
@@ -28,6 +29,7 @@ function pickItemPayload(body = {}) {
     category: body.category,
     unit: body.unit,
     price: body.price,
+    cost: body.cost,
     discountedPrice: body.discountedPrice,
     currency: body.currency,
     stock: body.stock,
@@ -53,6 +55,32 @@ function parseBoolean(value) {
     return false;
   }
   return undefined;
+}
+
+function toNullableNumber(value) {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function csvValue(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const str = String(value);
+  if (str.includes('"') || str.includes(',') || str.includes('\n')) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function resolveImportOrganizationId(req) {
+  if (!isPrivilegedRequest(req)) {
+    return getAuthenticatedOrganizationId(req);
+  }
+  return req.body?.organizationId || req.query?.organizationId || getAuthenticatedOrganizationId(req);
 }
 
 async function createItem(req, res) {
@@ -159,6 +187,193 @@ async function listItems(req, res) {
   } catch (err) {
     console.error('List items error:', err);
     return res.status(500).json({ ok: false, message: 'Unable to fetch items.' });
+  }
+}
+
+async function importItems(req, res) {
+  try {
+    const models = getItemModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ ok: false, message: 'CSV file is required.' });
+    }
+
+    const records = parse(req.file.buffer.toString('utf-8'), {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+    });
+
+    if (!Array.isArray(records) || records.length === 0) {
+      return res.status(400).json({ ok: false, message: 'CSV file has no rows to import.' });
+    }
+
+    const organizationId = resolveImportOrganizationId(req);
+    if (!organizationId) {
+      return res.status(400).json({ ok: false, message: 'organizationId is required.' });
+    }
+
+    const { Item } = models;
+    const currency = await getOrganizationCurrency(organizationId);
+    let imported = 0;
+    let skipped = 0;
+    const errors = [];
+
+    for (let index = 0; index < records.length; index += 1) {
+      const row = records[index];
+      const rowNum = index + 2;
+      const name = String(row.name || '').trim();
+
+      if (!name) {
+        skipped += 1;
+        errors.push(`Row ${rowNum}: name is required.`);
+        continue;
+      }
+
+      const payload = cleanUndefined({
+        organizationId,
+        type: String(row.type || '').trim().toLowerCase() || 'product',
+        sku: String(row.sku || '').trim() || undefined,
+        name,
+        description: String(row.description || '').trim() || undefined,
+        category: String(row.category || '').trim() || undefined,
+        unit: String(row.unit || '').trim() || undefined,
+        price: toNullableNumber(row.price),
+        cost: toNullableNumber(row.cost),
+        discountedPrice: toNullableNumber(row.discountedPrice),
+        stock: toNullableNumber(row.stock),
+        reorderLevel: toNullableNumber(row.reorderLevel),
+        taxRate: toNullableNumber(row.taxRate),
+        isActive: parseBoolean(row.isActive) ?? true,
+        currency,
+        createdBy: req.auth?.user?.id || null,
+        updatedBy: req.auth?.user?.id || null,
+      });
+
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await Item.create(payload);
+        imported += 1;
+      } catch (rowErr) {
+        skipped += 1;
+        errors.push(`Row ${rowNum}: ${rowErr.message || 'failed to import row.'}`);
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      message: `Item import complete. Imported ${imported}, skipped ${skipped}.`,
+      data: {
+        imported,
+        skipped,
+        totalRows: records.length,
+        errors,
+      },
+    });
+  } catch (err) {
+    console.error('Import items error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to import items.' });
+  }
+}
+
+async function exportItems(req, res) {
+  try {
+    const models = getItemModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+    const { Item } = models;
+
+    const where = {};
+    if (req.query.organizationId) {
+      where.organizationId = req.query.organizationId;
+    }
+    if (!isPrivilegedRequest(req)) {
+      const scopedWhere = applyOrganizationWhereScope(where, req);
+      if (!scopedWhere) {
+        return res.status(400).json({ ok: false, message: 'organizationId is required for this user.' });
+      }
+    }
+    if (req.query.type) {
+      where.type = req.query.type;
+    }
+    const isActive = parseBoolean(req.query.isActive);
+    if (isActive !== undefined) {
+      where.isActive = isActive;
+    }
+    if (req.query.q) {
+      where[Op.or] = [
+        { name: { [Op.like]: `%${req.query.q}%` } },
+        { sku: { [Op.like]: `%${req.query.q}%` } },
+        { category: { [Op.like]: `%${req.query.q}%` } },
+      ];
+    }
+
+    const rows = await Item.findAll({
+      where,
+      order: [['createdAt', 'DESC']],
+      limit: 10000,
+    });
+
+    const headers = [
+      'id',
+      'organizationId',
+      'type',
+      'sku',
+      'name',
+      'description',
+      'category',
+      'unit',
+      'price',
+      'cost',
+      'discountedPrice',
+      'currency',
+      'stock',
+      'reorderLevel',
+      'taxRate',
+      'isActive',
+      'createdAt',
+      'updatedAt',
+    ];
+
+    const lines = [headers.join(',')];
+    for (const row of rows) {
+      const json = row.toJSON();
+      lines.push(
+        [
+          csvValue(json.id),
+          csvValue(json.organizationId),
+          csvValue(json.type),
+          csvValue(json.sku),
+          csvValue(json.name),
+          csvValue(json.description),
+          csvValue(json.category),
+          csvValue(json.unit),
+          csvValue(json.price),
+          csvValue(json.cost),
+          csvValue(json.discountedPrice),
+          csvValue(json.currency),
+          csvValue(json.stock),
+          csvValue(json.reorderLevel),
+          csvValue(json.taxRate),
+          csvValue(json.isActive),
+          csvValue(json.createdAt),
+          csvValue(json.updatedAt),
+        ].join(',')
+      );
+    }
+
+    const csv = lines.join('\n');
+    const date = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=\"items-${date}.csv\"`);
+    return res.status(200).send(csv);
+  } catch (err) {
+    console.error('Export items error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to export items.' });
   }
 }
 
@@ -279,6 +494,8 @@ async function deleteItem(req, res) {
 
 module.exports = {
   createItem,
+  importItems,
+  exportItems,
   listItems,
   getItemById,
   updateItem,

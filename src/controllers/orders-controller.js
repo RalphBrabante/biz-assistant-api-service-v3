@@ -4,6 +4,7 @@ const { getOrganizationCurrency } = require('../services/organization-currency')
 const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
+  getScopedOrganizationId,
   applyOrganizationWhereScope,
 } = require('../services/request-scope');
 
@@ -30,6 +31,8 @@ function pickOrderPayload(body = {}) {
     currency: body.currency,
     subtotalAmount: body.subtotalAmount,
     taxAmount: body.taxAmount,
+    withHoldingTaxAmount: body.withHoldingTaxAmount,
+    withholdingTaxTypeId: body.withholdingTaxTypeId,
     discountAmount: body.discountAmount,
     shippingAmount: body.shippingAmount,
     totalAmount: body.totalAmount,
@@ -128,6 +131,36 @@ function computeOrderTotals(snapshotRows = [], shippingAmount = 0, vatRate = 0) 
   };
 }
 
+async function resolveWithholdingRate({
+  requestedWithholdingTaxTypeId = null,
+  organizationId,
+  WithholdingTaxType,
+  transaction,
+}) {
+  const withholdingTaxTypeId = String(requestedWithholdingTaxTypeId || '').trim();
+  if (!withholdingTaxTypeId) {
+    return { withholdingTaxTypeId: null, withholdingPercentage: 0 };
+  }
+
+  const withholdingTaxType = await WithholdingTaxType.findOne({
+    where: {
+      id: withholdingTaxTypeId,
+      organizationId,
+      isActive: true,
+    },
+    transaction,
+  });
+
+  if (!withholdingTaxType) {
+    throw new Error('withholdingTaxTypeId is invalid for this organization.');
+  }
+
+  return {
+    withholdingTaxTypeId: withholdingTaxType.id,
+    withholdingPercentage: Number(withholdingTaxType.percentage || 0),
+  };
+}
+
 function buildStockDemand(entries = [], itemById = new Map()) {
   const demandByItemId = new Map();
 
@@ -189,17 +222,19 @@ function isStockValidationError(err) {
 async function createOrder(req, res) {
   try {
     const models = getModels();
-    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Item || !models.Customer || !models.Organization) {
+    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Item || !models.Customer || !models.Organization || !models.WithholdingTaxType) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
-    const { Order, OrderItemSnapshot, Item, Customer, Organization } = models;
+    const { Order, OrderItemSnapshot, Item, Customer, Organization, WithholdingTaxType } = models;
     const payload = cleanUndefined(pickOrderPayload(req.body));
+    delete payload.withHoldingTaxAmount;
     const orderedItems = Array.isArray(req.body.orderedItems)
       ? req.body.orderedItems
       : [];
     const authUser = req.auth?.user || null;
-    const organizationId = getAuthenticatedOrganizationId(req);
+    const requestedOrganizationId = String(req.body?.organizationId || '').trim() || null;
+    const organizationId = getScopedOrganizationId(req, requestedOrganizationId) || getAuthenticatedOrganizationId(req);
     const authUserId = authUser?.id || null;
 
     payload.organizationId = organizationId;
@@ -281,6 +316,23 @@ async function createOrder(req, res) {
         });
       }
       const vatRate = Number(organization.taxType.percentage || 0);
+      let withholdingRate = 0;
+      try {
+        const withholding = await resolveWithholdingRate({
+          requestedWithholdingTaxTypeId: payload.withholdingTaxTypeId,
+          organizationId: payload.organizationId,
+          WithholdingTaxType,
+          transaction,
+        });
+        payload.withholdingTaxTypeId = withholding.withholdingTaxTypeId;
+        withholdingRate = withholding.withholdingPercentage;
+      } catch (withholdingErr) {
+        await transaction.rollback();
+        return res.status(400).json({
+          ok: false,
+          message: withholdingErr.message || 'withholdingTaxTypeId is invalid.',
+        });
+      }
 
       const snapshotRows = orderedItems.map((entry) =>
         buildSnapshotFromItem(itemById.get(entry.itemId), entry, vatRate)
@@ -289,11 +341,15 @@ async function createOrder(req, res) {
       ensureStockAvailable(itemById, stockDemand);
 
       const computedTotals = computeOrderTotals(snapshotRows, payload.shippingAmount || 0, vatRate);
+      const withholdingAmount = toFixed2(computedTotals.taxableAmount * (withholdingRate / 100));
       payload.subtotalAmount = computedTotals.subtotalAmount;
       payload.taxAmount = computedTotals.taxAmount;
+      payload.withHoldingTaxAmount = withholdingAmount;
       payload.discountAmount = computedTotals.discountAmount;
       payload.shippingAmount = computedTotals.shippingAmount;
-      payload.totalAmount = computedTotals.totalAmount;
+      payload.totalAmount = toFixed2(
+        Math.max(computedTotals.subtotalAmount + computedTotals.shippingAmount - withholdingAmount, 0)
+      );
 
       const order = await Order.create(payload, { transaction });
 
@@ -322,6 +378,12 @@ async function createOrder(req, res) {
             model: OrderItemSnapshot,
             as: 'orderedItemSnapshots',
           },
+          {
+            model: WithholdingTaxType,
+            as: 'withholdingTaxType',
+            attributes: ['id', 'code', 'name', 'percentage', 'appliesTo'],
+            required: false,
+          },
         ],
       });
 
@@ -342,10 +404,10 @@ async function createOrder(req, res) {
 async function listOrders(req, res) {
   try {
     const models = getModels();
-    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Customer || !models.Organization) {
+    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Customer || !models.Organization || !models.WithholdingTaxType) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { Order, OrderItemSnapshot, Customer, Organization } = models;
+    const { Order, OrderItemSnapshot, Customer, Organization, WithholdingTaxType } = models;
 
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
@@ -391,6 +453,12 @@ async function listOrders(req, res) {
           model: OrderItemSnapshot,
           as: 'orderedItemSnapshots',
         },
+        {
+          model: WithholdingTaxType,
+          as: 'withholdingTaxType',
+          attributes: ['id', 'code', 'name', 'percentage', 'appliesTo'],
+          required: false,
+        },
       ],
       order: [['createdAt', 'DESC']],
     });
@@ -414,10 +482,10 @@ async function listOrders(req, res) {
 async function getOrderById(req, res) {
   try {
     const models = getModels();
-    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Customer) {
+    if (!models || !models.Order || !models.OrderItemSnapshot || !models.Customer || !models.WithholdingTaxType) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { Order, OrderItemSnapshot, Customer } = models;
+    const { Order, OrderItemSnapshot, Customer, WithholdingTaxType } = models;
 
     const where = { id: req.params.id };
     if (!isPrivilegedRequest(req)) {
@@ -438,6 +506,12 @@ async function getOrderById(req, res) {
         {
           model: OrderItemSnapshot,
           as: 'orderedItemSnapshots',
+        },
+        {
+          model: WithholdingTaxType,
+          as: 'withholdingTaxType',
+          attributes: ['id', 'code', 'name', 'percentage', 'appliesTo'],
+          required: false,
         },
       ],
     });
@@ -462,11 +536,12 @@ async function updateOrder(req, res) {
       !models.OrderItemSnapshot ||
       !models.Item ||
       !models.SalesInvoice ||
-      !models.Organization
+      !models.Organization ||
+      !models.WithholdingTaxType
     ) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { Order, Customer, OrderItemSnapshot, Item, SalesInvoice, Organization } = models;
+    const { Order, Customer, OrderItemSnapshot, Item, SalesInvoice, Organization, WithholdingTaxType } = models;
 
     const where = { id: req.params.id };
     if (!isPrivilegedRequest(req)) {
@@ -487,6 +562,12 @@ async function updateOrder(req, res) {
     }
 
     const payload = cleanUndefined(pickOrderPayload(req.body));
+    delete payload.withHoldingTaxAmount;
+    const requestedWithholdingTaxTypeId =
+      Object.prototype.hasOwnProperty.call(req.body || {}, 'withholdingTaxTypeId')
+        ? req.body.withholdingTaxTypeId
+        : undefined;
+    delete payload.withholdingTaxTypeId;
     const orderedItems = Array.isArray(req.body.orderedItems) ? req.body.orderedItems : null;
     if (!isPrivilegedRequest(req)) {
       delete payload.organizationId;
@@ -522,12 +603,16 @@ async function updateOrder(req, res) {
       order.status !== 'confirmed' &&
       order.status !== 'completed' &&
       nextStatus === 'confirmed';
+    const shouldRecomputeTotals =
+      hasOrderedItemsUpdate ||
+      payload.shippingAmount !== undefined ||
+      requestedWithholdingTaxTypeId !== undefined;
     const salesInvoiceId = String(req.body?.salesInvoiceId || '').trim();
     const salesInvoiceIssueDate = String(
       req.body?.salesInvoiceIssueDate || new Date().toISOString().slice(0, 10)
     ).trim();
 
-    if (!hasFieldUpdates && !hasOrderedItemsUpdate) {
+    if (!hasFieldUpdates && !hasOrderedItemsUpdate && requestedWithholdingTaxTypeId === undefined) {
       return res.status(400).json({ ok: false, message: 'No valid fields provided for update.' });
     }
     if (isTransitioningToCompleted && !salesInvoiceId) {
@@ -550,6 +635,24 @@ async function updateOrder(req, res) {
     try {
       if (hasFieldUpdates) {
         await order.update(payload, { transaction });
+      }
+
+      if (requestedWithholdingTaxTypeId !== undefined) {
+        try {
+          const withholding = await resolveWithholdingRate({
+            requestedWithholdingTaxTypeId,
+            organizationId: order.organizationId,
+            WithholdingTaxType,
+            transaction,
+          });
+          await order.update({ withholdingTaxTypeId: withholding.withholdingTaxTypeId }, { transaction });
+        } catch (withholdingErr) {
+          await transaction.rollback();
+          return res.status(400).json({
+            ok: false,
+            message: withholdingErr.message || 'withholdingTaxTypeId is invalid.',
+          });
+        }
       }
 
       if (hasOrderedItemsUpdate) {
@@ -601,6 +704,25 @@ async function updateOrder(req, res) {
           });
         }
         const vatRate = Number(organization.taxType.percentage || 0);
+        let withholdingRate = 0;
+        try {
+          const withholding = await resolveWithholdingRate({
+            requestedWithholdingTaxTypeId: order.withholdingTaxTypeId,
+            organizationId: order.organizationId,
+            WithholdingTaxType,
+            transaction,
+          });
+          if (order.withholdingTaxTypeId !== withholding.withholdingTaxTypeId) {
+            await order.update({ withholdingTaxTypeId: withholding.withholdingTaxTypeId }, { transaction });
+          }
+          withholdingRate = withholding.withholdingPercentage;
+        } catch (withholdingErr) {
+          await transaction.rollback();
+          return res.status(400).json({
+            ok: false,
+            message: withholdingErr.message || 'withholdingTaxTypeId is invalid.',
+          });
+        }
 
         const itemById = new Map(items.map((item) => [item.id, item]));
         const snapshotRows = orderedItems.map((entry) =>
@@ -618,9 +740,17 @@ async function updateOrder(req, res) {
           {
             subtotalAmount: computedTotals.subtotalAmount,
             taxAmount: computedTotals.taxAmount,
+            withHoldingTaxAmount: toFixed2(computedTotals.taxableAmount * (withholdingRate / 100)),
             discountAmount: computedTotals.discountAmount,
             shippingAmount: computedTotals.shippingAmount,
-            totalAmount: computedTotals.totalAmount,
+            totalAmount: toFixed2(
+              Math.max(
+                computedTotals.subtotalAmount +
+                  computedTotals.shippingAmount -
+                  toFixed2(computedTotals.taxableAmount * (withholdingRate / 100)),
+                0
+              )
+            ),
           },
           { transaction }
         );
@@ -641,7 +771,7 @@ async function updateOrder(req, res) {
         if (shouldApplyStockOnConfirm) {
           await applyStockDeduction(itemById, stockDemand, transaction);
         }
-      } else if (payload.shippingAmount !== undefined) {
+      } else if (shouldRecomputeTotals) {
         const organization = await Organization.findByPk(order.organizationId, {
           include: [
             {
@@ -660,22 +790,45 @@ async function updateOrder(req, res) {
           });
         }
         const vatRate = Number(organization.taxType.percentage || 0);
+        let withholdingRate = 0;
+        try {
+          const withholding = await resolveWithholdingRate({
+            requestedWithholdingTaxTypeId: order.withholdingTaxTypeId,
+            organizationId: order.organizationId,
+            WithholdingTaxType,
+            transaction,
+          });
+          if (order.withholdingTaxTypeId !== withholding.withholdingTaxTypeId) {
+            await order.update({ withholdingTaxTypeId: withholding.withholdingTaxTypeId }, { transaction });
+          }
+          withholdingRate = withholding.withholdingPercentage;
+        } catch (withholdingErr) {
+          await transaction.rollback();
+          return res.status(400).json({
+            ok: false,
+            message: withholdingErr.message || 'withholdingTaxTypeId is invalid.',
+          });
+        }
         const existingSnapshots = await OrderItemSnapshot.findAll({
           where: { orderId: order.id },
           transaction,
         });
         const computedTotals = computeOrderTotals(
           existingSnapshots.map((row) => row.toJSON()),
-          payload.shippingAmount,
+          payload.shippingAmount !== undefined ? payload.shippingAmount : order.shippingAmount,
           vatRate
         );
+        const withholdingAmount = toFixed2(computedTotals.taxableAmount * (withholdingRate / 100));
         await order.update(
           {
             subtotalAmount: computedTotals.subtotalAmount,
             taxAmount: computedTotals.taxAmount,
+            withHoldingTaxAmount: withholdingAmount,
             discountAmount: computedTotals.discountAmount,
             shippingAmount: computedTotals.shippingAmount,
-            totalAmount: computedTotals.totalAmount,
+            totalAmount: toFixed2(
+              Math.max(computedTotals.subtotalAmount + computedTotals.shippingAmount - withholdingAmount, 0)
+            ),
           },
           { transaction }
         );
@@ -744,6 +897,12 @@ async function updateOrder(req, res) {
             status: 'issued',
             paymentStatus: order.paymentStatus || 'unpaid',
             currency: await getOrganizationCurrency(order.organizationId, order.currency || 'USD'),
+            amount: order.subtotalAmount || 0,
+            taxableAmount: Math.max(
+              Number(order.subtotalAmount || 0) - Number(order.taxAmount || 0),
+              0
+            ),
+            withHoldingTaxAmount: order.withHoldingTaxAmount || 0,
             subtotalAmount: order.subtotalAmount || 0,
             taxAmount: order.taxAmount || 0,
             discountAmount: order.discountAmount || 0,
@@ -768,6 +927,12 @@ async function updateOrder(req, res) {
           {
             model: OrderItemSnapshot,
             as: 'orderedItemSnapshots',
+          },
+          {
+            model: WithholdingTaxType,
+            as: 'withholdingTaxType',
+            attributes: ['id', 'code', 'name', 'percentage', 'appliesTo'],
+            required: false,
           },
         ],
       });

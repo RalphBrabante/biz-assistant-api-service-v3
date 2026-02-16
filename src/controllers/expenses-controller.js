@@ -452,6 +452,15 @@ async function listExpenses(req, res) {
     if (req.query.status) where.status = req.query.status;
     if (req.query.paymentMethod) where.paymentMethod = req.query.paymentMethod;
     if (req.query.vatExemptAmount) where.vatExemptAmount = req.query.vatExemptAmount;
+    if (req.query.expenseDateFrom || req.query.expenseDateTo) {
+      where.expenseDate = {};
+      if (req.query.expenseDateFrom) {
+        where.expenseDate[Op.gte] = req.query.expenseDateFrom;
+      }
+      if (req.query.expenseDateTo) {
+        where.expenseDate[Op.lte] = req.query.expenseDateTo;
+      }
+    }
 
     if (req.query.q) {
       where[Op.or] = [
@@ -528,6 +537,15 @@ async function exportExpenses(req, res) {
     if (req.query.status) where.status = req.query.status;
     if (req.query.paymentMethod) where.paymentMethod = req.query.paymentMethod;
     if (req.query.vatExemptAmount) where.vatExemptAmount = req.query.vatExemptAmount;
+    if (req.query.expenseDateFrom || req.query.expenseDateTo) {
+      where.expenseDate = {};
+      if (req.query.expenseDateFrom) {
+        where.expenseDate[Op.gte] = req.query.expenseDateFrom;
+      }
+      if (req.query.expenseDateTo) {
+        where.expenseDate[Op.lte] = req.query.expenseDateTo;
+      }
+    }
 
     if (req.query.q) {
       where[Op.or] = [

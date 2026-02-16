@@ -78,6 +78,15 @@ function initOrderModel(sequelize) {
         allowNull: false,
         defaultValue: 0.0,
       },
+      withHoldingTaxAmount: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: false,
+        defaultValue: 0.0,
+      },
+      withholdingTaxTypeId: {
+        type: DataTypes.UUID,
+        allowNull: true,
+      },
       discountAmount: {
         type: DataTypes.DECIMAL(12, 2),
         allowNull: false,
@@ -139,6 +148,8 @@ function initOrderModel(sequelize) {
         { fields: ['status'] },
         { fields: ['payment_status'] },
         { fields: ['fulfillment_status'] },
+        { fields: ['with_holding_tax_amount'] },
+        { fields: ['withholding_tax_type_id'] },
         { fields: ['order_date'] },
         { fields: ['created_by'] },
         { fields: ['updated_by'] },

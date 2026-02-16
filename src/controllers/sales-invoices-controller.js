@@ -26,6 +26,9 @@ function pickSalesInvoicePayload(body = {}) {
     status: body.status,
     paymentStatus: body.paymentStatus,
     currency: body.currency,
+    amount: body.amount,
+    taxableAmount: body.taxableAmount,
+    withHoldingTaxAmount: body.withHoldingTaxAmount,
     subtotalAmount: body.subtotalAmount,
     taxAmount: body.taxAmount,
     discountAmount: body.discountAmount,
@@ -51,6 +54,60 @@ function toNullableNumber(value) {
   return Number.isFinite(numeric) ? numeric : undefined;
 }
 
+function parseBoolean(value) {
+  if (value === true || value === 'true' || value === 1 || value === '1') {
+    return true;
+  }
+  if (value === false || value === 'false' || value === 0 || value === '0') {
+    return false;
+  }
+  return false;
+}
+
+function normalizeHeaderKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function roundCurrency(value) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  return Math.round((numeric + Number.EPSILON) * 100) / 100;
+}
+
+function normalizeInvoiceTotals(payload = {}) {
+  const subtotalAmount = roundCurrency(
+    payload.subtotalAmount !== undefined ? payload.subtotalAmount : payload.amount
+  );
+  const taxAmount = roundCurrency(payload.taxAmount);
+  const withHoldingTaxAmount = roundCurrency(payload.withHoldingTaxAmount);
+  const taxableAmount = roundCurrency(
+    payload.taxableAmount !== undefined
+      ? payload.taxableAmount
+      : Math.max(subtotalAmount - taxAmount, 0)
+  );
+
+  payload.amount = subtotalAmount;
+  payload.subtotalAmount = subtotalAmount;
+  payload.taxAmount = taxAmount;
+  payload.taxableAmount = taxableAmount;
+  payload.withHoldingTaxAmount = withHoldingTaxAmount;
+
+  if (payload.totalAmount !== undefined) {
+    payload.totalAmount = roundCurrency(payload.totalAmount);
+  } else {
+    payload.totalAmount = roundCurrency(
+      Math.max(subtotalAmount - withHoldingTaxAmount - roundCurrency(payload.discountAmount), 0)
+    );
+  }
+  if (payload.discountAmount !== undefined) {
+    payload.discountAmount = roundCurrency(payload.discountAmount);
+  }
+}
+
 function csvValue(value) {
   if (value === null || value === undefined) {
     return '';
@@ -60,6 +117,26 @@ function csvValue(value) {
     return `"${str.replace(/"/g, '""')}"`;
   }
   return str;
+}
+
+function resolveSortOptions(query = {}) {
+  const allowedSortFields = new Set([
+    'createdAt',
+    'updatedAt',
+    'invoiceNumber',
+    'issueDate',
+    'dueDate',
+    'status',
+    'paymentStatus',
+    'amount',
+    'taxableAmount',
+    'totalAmount',
+  ]);
+  const requestedField = String(query.sortBy || 'createdAt').trim();
+  const sortBy = allowedSortFields.has(requestedField) ? requestedField : 'createdAt';
+  const requestedDirection = String(query.sortDirection || 'DESC').trim().toUpperCase();
+  const sortDirection = requestedDirection === 'ASC' ? 'ASC' : 'DESC';
+  return { sortBy, sortDirection };
 }
 
 function resolveImportOrganizationId(req) {
@@ -93,6 +170,7 @@ async function importSalesInvoices(req, res) {
     }
 
     const organizationId = resolveImportOrganizationId(req);
+    const forceImport = parseBoolean(req.body?.forceImport || req.query?.forceImport);
 
     if (!organizationId) {
       return res.status(400).json({ ok: false, message: 'organizationId is required.' });
@@ -100,56 +178,82 @@ async function importSalesInvoices(req, res) {
 
     const currency = await getOrganizationCurrency(organizationId);
     let imported = 0;
+    let updated = 0;
     let skipped = 0;
     const errors = [];
 
     for (let index = 0; index < records.length; index += 1) {
       const row = records[index];
       const rowNum = index + 2;
-      const orderId = String(row.orderId || '').trim();
-      const invoiceNumber = String(row.invoiceNumber || '').trim();
-      const issueDate = String(row.issueDate || '').trim();
+      const rowMap = new Map(
+        Object.entries(row || {}).map(([key, value]) => [normalizeHeaderKey(key), value])
+      );
+      const cell = (...aliases) => {
+        for (const alias of aliases) {
+          const value = rowMap.get(normalizeHeaderKey(alias));
+          if (value !== undefined && value !== null && String(value).trim() !== '') {
+            return String(value).trim();
+          }
+        }
+        return '';
+      };
+      const numberCell = (...aliases) => {
+        const value = cell(...aliases);
+        return toNullableNumber(value);
+      };
 
-      if (!orderId || !invoiceNumber || !issueDate) {
+      const orderId = cell('orderId', 'order_id', 'order id');
+      const invoiceNumber = cell('invoiceNumber', 'invoice_number', 'invoice no', 'invoice_no');
+      const issueDate = cell('issueDate', 'issue_date', 'invoiceDate', 'invoice_date');
+
+      if (!invoiceNumber || !issueDate) {
         skipped += 1;
-        errors.push(`Row ${rowNum}: orderId, invoiceNumber and issueDate are required.`);
+        errors.push(`Row ${rowNum}: invoiceNumber and issueDate are required.`);
         continue;
       }
 
       // eslint-disable-next-line no-await-in-loop
-      const duplicate = await SalesInvoice.findOne({
+      const duplicateByInvoice = await SalesInvoice.findOne({
         where: {
           organizationId,
           invoiceNumber,
         },
       });
-      if (duplicate) {
-        skipped += 1;
-        errors.push(`Row ${rowNum}: invoiceNumber already exists.`);
-        continue;
-      }
+      // eslint-disable-next-line no-await-in-loop
+      const duplicateByOrder = orderId
+        ? await SalesInvoice.findOne({
+            where: {
+              organizationId,
+              orderId,
+            },
+          })
+        : null;
 
       const payload = cleanUndefined({
         organizationId,
-        orderId,
+        orderId: orderId || undefined,
         invoiceNumber,
         issueDate,
-        dueDate: String(row.dueDate || '').trim() || undefined,
-        status: String(row.status || '').trim() || 'draft',
-        paymentStatus: String(row.paymentStatus || '').trim() || 'unpaid',
+        dueDate: cell('dueDate', 'due_date') || undefined,
+        status: cell('status') || 'draft',
+        paymentStatus: cell('paymentStatus', 'payment_status') || 'unpaid',
         currency,
-        subtotalAmount: toNullableNumber(row.subtotalAmount),
-        taxAmount: toNullableNumber(row.taxAmount),
-        discountAmount: toNullableNumber(row.discountAmount),
-        totalAmount: toNullableNumber(row.totalAmount),
-        paidAt: String(row.paidAt || '').trim() || undefined,
-        notes: String(row.notes || '').trim() || undefined,
+        amount: numberCell('amount'),
+        taxableAmount: numberCell('taxableAmount', 'taxable_amount'),
+        withHoldingTaxAmount: numberCell('withHoldingTaxAmount', 'with_holding_tax_amount', 'withholding_tax_amount'),
+        subtotalAmount: numberCell('subtotalAmount', 'subtotal_amount'),
+        taxAmount: numberCell('taxAmount', 'tax_amount'),
+        discountAmount: numberCell('discountAmount', 'discount_amount'),
+        totalAmount: numberCell('totalAmount', 'total_amount'),
+        paidAt: cell('paidAt', 'paid_at') || undefined,
+        notes: cell('notes') || undefined,
         createdBy: req.auth?.user?.id || null,
         updatedBy: req.auth?.user?.id || null,
       });
+      normalizeInvoiceTotals(payload);
 
       try {
-        if (Order) {
+        if (Order && orderId) {
           // eslint-disable-next-line no-await-in-loop
           const order = await Order.findOne({
             where: {
@@ -164,6 +268,47 @@ async function importSalesInvoices(req, res) {
           }
         }
 
+        if (duplicateByInvoice || duplicateByOrder) {
+          if (!forceImport) {
+            skipped += 1;
+            if (duplicateByInvoice && duplicateByOrder && duplicateByInvoice.id === duplicateByOrder.id) {
+              errors.push(`Row ${rowNum}: invoiceNumber and orderId already exist (enable Force Import to overwrite by invoice number).`);
+            } else if (duplicateByInvoice) {
+              errors.push(`Row ${rowNum}: invoiceNumber already exists (enable Force Import to overwrite by invoice number).`);
+            } else {
+              errors.push(`Row ${rowNum}: orderId already has a sales invoice. Use a different orderId.`);
+            }
+            continue;
+          }
+
+          // Force import overwrites by invoice number only.
+          if (!duplicateByInvoice) {
+            skipped += 1;
+            errors.push(`Row ${rowNum}: cannot force overwrite by orderId. Force Import only overwrites by invoiceNumber.`);
+            continue;
+          }
+
+          // Avoid cross-record collisions where invoice number belongs to one row and order to another.
+          if (duplicateByOrder && duplicateByOrder.id !== duplicateByInvoice.id) {
+            skipped += 1;
+            errors.push(`Row ${rowNum}: invoiceNumber and orderId belong to different existing invoices. Resolve conflict manually.`);
+            continue;
+          }
+
+          const target = duplicateByInvoice;
+          const updatePayload = {
+            ...payload,
+            // Do not override order linkage during force import.
+            orderId: target.orderId,
+            createdBy: target.createdBy || payload.createdBy,
+            updatedBy: req.auth?.user?.id || target.updatedBy || null,
+          };
+          // eslint-disable-next-line no-await-in-loop
+          await target.update(updatePayload);
+          updated += 1;
+          continue;
+        }
+
         // eslint-disable-next-line no-await-in-loop
         await SalesInvoice.create(payload);
         imported += 1;
@@ -175,10 +320,12 @@ async function importSalesInvoices(req, res) {
 
     return res.status(200).json({
       ok: true,
-      message: `Sales invoice import complete. Imported ${imported}, skipped ${skipped}.`,
+      message: `Sales invoice import complete. Imported ${imported}, updated ${updated}, skipped ${skipped}.`,
       data: {
         imported,
+        updated,
         skipped,
+        forceImport,
         totalRows: records.length,
         errors,
       },
@@ -204,9 +351,6 @@ async function createSalesInvoice(req, res) {
     if (!payload.organizationId) {
       return res.status(400).json({ ok: false, message: 'organizationId is required.' });
     }
-    if (!payload.orderId) {
-      return res.status(400).json({ ok: false, message: 'orderId is required.' });
-    }
     if (!payload.invoiceNumber) {
       return res.status(400).json({ ok: false, message: 'invoiceNumber is required.' });
     }
@@ -214,6 +358,7 @@ async function createSalesInvoice(req, res) {
       return res.status(400).json({ ok: false, message: 'issueDate is required.' });
     }
     payload.currency = await getOrganizationCurrency(payload.organizationId);
+    normalizeInvoiceTotals(payload);
 
     const salesInvoice = await SalesInvoice.create(payload);
     return res.status(201).json({ ok: true, data: salesInvoice });
@@ -232,8 +377,9 @@ async function listSalesInvoices(req, res) {
     const { SalesInvoice, Organization } = models;
 
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 10000);
     const offset = (page - 1) * limit;
+    const { sortBy, sortDirection } = resolveSortOptions(req.query);
 
     const where = {};
     if (req.query.organizationId) where.organizationId = req.query.organizationId;
@@ -246,11 +392,22 @@ async function listSalesInvoices(req, res) {
     if (req.query.orderId) where.orderId = req.query.orderId;
     if (req.query.status) where.status = req.query.status;
     if (req.query.paymentStatus) where.paymentStatus = req.query.paymentStatus;
+    if (req.query.issueDateFrom || req.query.issueDateTo) {
+      where.issueDate = {};
+      if (req.query.issueDateFrom) {
+        where.issueDate[Op.gte] = req.query.issueDateFrom;
+      }
+      if (req.query.issueDateTo) {
+        where.issueDate[Op.lte] = req.query.issueDateTo;
+      }
+    }
 
     if (req.query.q) {
       where[Op.or] = [
         { invoiceNumber: { [Op.like]: `%${req.query.q}%` } },
         { status: { [Op.like]: `%${req.query.q}%` } },
+        { paymentStatus: { [Op.like]: `%${req.query.q}%` } },
+        { orderId: { [Op.like]: `%${req.query.q}%` } },
       ];
     }
 
@@ -266,7 +423,10 @@ async function listSalesInvoices(req, res) {
       ],
       limit,
       offset,
-      order: [['createdAt', 'DESC']],
+      order: [
+        [sortBy, sortDirection],
+        ['createdAt', 'DESC'],
+      ],
     });
 
     return res.status(200).json({
@@ -293,6 +453,7 @@ async function exportSalesInvoices(req, res) {
     }
 
     const where = {};
+    const { sortBy, sortDirection } = resolveSortOptions(req.query);
     if (req.query.organizationId) where.organizationId = req.query.organizationId;
     if (!isPrivilegedRequest(req)) {
       const scopedWhere = applyOrganizationWhereScope(where, req);
@@ -303,17 +464,31 @@ async function exportSalesInvoices(req, res) {
     if (req.query.orderId) where.orderId = req.query.orderId;
     if (req.query.status) where.status = req.query.status;
     if (req.query.paymentStatus) where.paymentStatus = req.query.paymentStatus;
+    if (req.query.issueDateFrom || req.query.issueDateTo) {
+      where.issueDate = {};
+      if (req.query.issueDateFrom) {
+        where.issueDate[Op.gte] = req.query.issueDateFrom;
+      }
+      if (req.query.issueDateTo) {
+        where.issueDate[Op.lte] = req.query.issueDateTo;
+      }
+    }
 
     if (req.query.q) {
       where[Op.or] = [
         { invoiceNumber: { [Op.like]: `%${req.query.q}%` } },
         { status: { [Op.like]: `%${req.query.q}%` } },
+        { paymentStatus: { [Op.like]: `%${req.query.q}%` } },
+        { orderId: { [Op.like]: `%${req.query.q}%` } },
       ];
     }
 
     const rows = await SalesInvoice.findAll({
       where,
-      order: [['createdAt', 'DESC']],
+      order: [
+        [sortBy, sortDirection],
+        ['createdAt', 'DESC'],
+      ],
       limit: 10000,
     });
 
@@ -327,6 +502,9 @@ async function exportSalesInvoices(req, res) {
       'status',
       'paymentStatus',
       'currency',
+      'amount',
+      'taxableAmount',
+      'withHoldingTaxAmount',
       'subtotalAmount',
       'taxAmount',
       'discountAmount',
@@ -351,6 +529,9 @@ async function exportSalesInvoices(req, res) {
           csvValue(json.status),
           csvValue(json.paymentStatus),
           csvValue(json.currency),
+          csvValue(json.amount),
+          csvValue(json.taxableAmount),
+          csvValue(json.withHoldingTaxAmount),
           csvValue(json.subtotalAmount),
           csvValue(json.taxAmount),
           csvValue(json.discountAmount),

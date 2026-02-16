@@ -47,6 +47,15 @@ function resolveOrganizationId(req, fallbackFromBody = null) {
   return authOrgId;
 }
 
+function resolveOrganizationIdForRead(req) {
+  const authOrgId = req.auth?.user?.organizationId || null;
+  if (isPrivilegedRequest(req)) {
+    const requested = req.query.organizationId || null;
+    return requested || null;
+  }
+  return authOrgId;
+}
+
 async function computeQuarterlySalesInvoiceReport(req, res, next) {
   try {
     const models = getModels();
@@ -157,8 +166,9 @@ async function listQuarterlySalesReports(req, res, next) {
       });
     }
 
-    const organizationId = resolveOrganizationId(req);
-    if (!organizationId) {
+    const organizationId = resolveOrganizationIdForRead(req);
+    const isPrivileged = isPrivilegedRequest(req);
+    if (!isPrivileged && !organizationId) {
       return res.status(400).json({
         code: 'BAD_REQUEST',
         message: 'organizationId could not be resolved from authenticated user.',
@@ -170,7 +180,10 @@ async function listQuarterlySalesReports(req, res, next) {
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
     const offset = (page - 1) * limit;
 
-    const where = { organizationId };
+    const where = {};
+    if (organizationId) {
+      where.organizationId = organizationId;
+    }
 
     const yearFilter = parseYear(req.query.year);
     if (req.query.year !== undefined && yearFilter !== null) {
@@ -226,8 +239,9 @@ async function getQuarterlySalesReportById(req, res, next) {
       });
     }
 
-    const organizationId = resolveOrganizationId(req);
-    if (!organizationId) {
+    const organizationId = resolveOrganizationIdForRead(req);
+    const isPrivileged = isPrivilegedRequest(req);
+    if (!isPrivileged && !organizationId) {
       return res.status(400).json({
         code: 'BAD_REQUEST',
         message: 'organizationId could not be resolved from authenticated user.',
@@ -238,7 +252,7 @@ async function getQuarterlySalesReportById(req, res, next) {
     const report = await QuarterlySalesReport.findOne({
       where: {
         id: req.params.id,
-        organizationId,
+        ...(organizationId ? { organizationId } : {}),
       },
       include: [
         {
@@ -260,6 +274,51 @@ async function getQuarterlySalesReportById(req, res, next) {
       code: 'SUCCESS',
       message: 'Quarterly sales report fetched successfully.',
       data: report,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function deleteQuarterlySalesReport(req, res, next) {
+  try {
+    const models = getModels();
+    if (!models || !models.QuarterlySalesReport) {
+      return res.status(503).json({
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'Database models are not ready yet.',
+      });
+    }
+
+    const organizationId = resolveOrganizationIdForRead(req);
+    const isPrivileged = isPrivilegedRequest(req);
+    if (!isPrivileged && !organizationId) {
+      return res.status(400).json({
+        code: 'BAD_REQUEST',
+        message: 'organizationId could not be resolved from authenticated user.',
+      });
+    }
+
+    const { QuarterlySalesReport } = models;
+    const report = await QuarterlySalesReport.findOne({
+      where: {
+        id: req.params.id,
+        ...(organizationId ? { organizationId } : {}),
+      },
+    });
+
+    if (!report) {
+      return res.status(404).json({
+        code: 'NOT_FOUND',
+        message: 'Quarterly sales report not found.',
+      });
+    }
+
+    await report.destroy();
+
+    return res.status(200).json({
+      code: 'SUCCESS',
+      message: 'Quarterly sales report deleted successfully.',
     });
   } catch (err) {
     return next(err);
@@ -376,8 +435,9 @@ async function listQuarterlyExpenseReports(req, res, next) {
       });
     }
 
-    const organizationId = resolveOrganizationId(req);
-    if (!organizationId) {
+    const organizationId = resolveOrganizationIdForRead(req);
+    const isPrivileged = isPrivilegedRequest(req);
+    if (!isPrivileged && !organizationId) {
       return res.status(400).json({
         code: 'BAD_REQUEST',
         message: 'organizationId could not be resolved from authenticated user.',
@@ -389,7 +449,10 @@ async function listQuarterlyExpenseReports(req, res, next) {
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
     const offset = (page - 1) * limit;
 
-    const where = { organizationId };
+    const where = {};
+    if (organizationId) {
+      where.organizationId = organizationId;
+    }
 
     const yearFilter = parseYear(req.query.year);
     if (req.query.year !== undefined && yearFilter !== null) {
@@ -445,8 +508,9 @@ async function getQuarterlyExpenseReportById(req, res, next) {
       });
     }
 
-    const organizationId = resolveOrganizationId(req);
-    if (!organizationId) {
+    const organizationId = resolveOrganizationIdForRead(req);
+    const isPrivileged = isPrivilegedRequest(req);
+    if (!isPrivileged && !organizationId) {
       return res.status(400).json({
         code: 'BAD_REQUEST',
         message: 'organizationId could not be resolved from authenticated user.',
@@ -457,7 +521,7 @@ async function getQuarterlyExpenseReportById(req, res, next) {
     const report = await QuarterlyExpenseReport.findOne({
       where: {
         id: req.params.id,
-        organizationId,
+        ...(organizationId ? { organizationId } : {}),
       },
       include: [
         {
@@ -485,11 +549,58 @@ async function getQuarterlyExpenseReportById(req, res, next) {
   }
 }
 
+async function deleteQuarterlyExpenseReport(req, res, next) {
+  try {
+    const models = getModels();
+    if (!models || !models.QuarterlyExpenseReport) {
+      return res.status(503).json({
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'Database models are not ready yet.',
+      });
+    }
+
+    const organizationId = resolveOrganizationIdForRead(req);
+    const isPrivileged = isPrivilegedRequest(req);
+    if (!isPrivileged && !organizationId) {
+      return res.status(400).json({
+        code: 'BAD_REQUEST',
+        message: 'organizationId could not be resolved from authenticated user.',
+      });
+    }
+
+    const { QuarterlyExpenseReport } = models;
+    const report = await QuarterlyExpenseReport.findOne({
+      where: {
+        id: req.params.id,
+        ...(organizationId ? { organizationId } : {}),
+      },
+    });
+
+    if (!report) {
+      return res.status(404).json({
+        code: 'NOT_FOUND',
+        message: 'Quarterly expense report not found.',
+      });
+    }
+
+    await report.destroy();
+
+    return res.status(200).json({
+      code: 'SUCCESS',
+      message: 'Quarterly expense report deleted successfully.',
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   computeQuarterlySalesInvoiceReport,
   listQuarterlySalesReports,
   getQuarterlySalesReportById,
+  deleteQuarterlySalesReport,
   computeQuarterlyExpenseReport,
   listQuarterlyExpenseReports,
   getQuarterlyExpenseReportById,
+  deleteQuarterlyExpenseReport,
 };

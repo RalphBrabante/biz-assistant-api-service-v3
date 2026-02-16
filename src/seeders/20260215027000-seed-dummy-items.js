@@ -28,6 +28,7 @@ module.exports = {
       const organizationId = organizationIds[index % organizationIds.length];
       const isService = n % 5 === 0;
       const basePrice = 20 + n * 3.5;
+      const baseCost = basePrice * 0.65;
       const discountedPrice = n % 4 === 0 ? basePrice * 0.92 : null;
       const stock = isService ? 0 : 20 + (n % 12) * 7;
 
@@ -43,6 +44,7 @@ module.exports = {
         category: categories[index % categories.length],
         unit: isService ? 'hour' : units[index % units.length],
         price: basePrice.toFixed(2),
+        cost: baseCost.toFixed(2),
         discounted_price: discountedPrice ? discountedPrice.toFixed(2) : null,
         currency: 'USD',
         stock,
