@@ -50,23 +50,43 @@ async function sendViaSmtp2go({ toEmail, subject, html, text }) {
 
   if (!response.ok) {
     const reason = parsed?.data?.error || parsed?.error || raw || `HTTP ${response.status}`;
+    console.error(
+      `[EMAIL][SMTP2GO][FAILED] to=${toEmail} subject="${subject}" status=${response.status} reason="${reason}"`
+    );
     throw new Error(`SMTP2GO send failed: ${reason}`);
   }
 
   if (parsed && String(parsed.data?.succeeded || '0') === '0') {
     const reason = parsed?.data?.error || 'SMTP2GO rejected message.';
+    console.error(
+      `[EMAIL][SMTP2GO][FAILED] to=${toEmail} subject="${subject}" status=200 reason="${reason}"`
+    );
     throw new Error(`SMTP2GO send failed: ${reason}`);
   }
 
+  const requestId = parsed?.data?.email_id || parsed?.data?.request_id || '-';
+  console.log(
+    `[EMAIL][SMTP2GO][SENT] to=${toEmail} subject="${subject}" requestId=${requestId}`
+  );
   return parsed || { ok: true };
 }
 
 async function sendMail({ toEmail, subject, html, text }) {
   const smtp2goApiKey = String(process.env.SMTP2GO_API_KEY || '').trim();
   if (!smtp2goApiKey) {
+    console.error(
+      `[EMAIL][SMTP2GO][FAILED] to=${toEmail} subject="${subject}" reason="SMTP2GO_API_KEY missing"`
+    );
     throw new Error('SMTP2GO_API_KEY is required. SMTP credentials fallback is disabled.');
   }
-  return sendViaSmtp2go({ toEmail, subject, html, text });
+  try {
+    return await sendViaSmtp2go({ toEmail, subject, html, text });
+  } catch (err) {
+    console.error(
+      `[EMAIL][SMTP2GO][FAILED] to=${toEmail} subject="${subject}" error="${err.message}"`
+    );
+    throw err;
+  }
 }
 
 async function sendPasswordResetEmail({

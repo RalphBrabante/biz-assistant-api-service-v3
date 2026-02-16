@@ -23,6 +23,7 @@ const withholdingTaxTypesRoutes = require('./routes/withholding-tax-types-routes
 const profileRoutes = require('./routes/profile-routes');
 const devRoutes = require('./routes/dev-routes');
 const { authenticateRequest } = require('./middleware/authz');
+const { requestLogger } = require('./middleware/request-logger');
 const {
   readCacheMiddleware,
   invalidateCacheOnWriteMiddleware,
@@ -43,6 +44,7 @@ const port = process.env.PORT || 3000;
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '1mb' }));
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use(errorResponseShapeMiddleware);
+app.use(requestLogger);
 
 let sequelize;
 let redisClient;
