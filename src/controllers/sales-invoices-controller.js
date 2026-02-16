@@ -79,6 +79,7 @@ function roundCurrency(value) {
 }
 
 function normalizeInvoiceTotals(payload = {}) {
+  // Normalize invoice math in one place so create/import use the same rules.
   const subtotalAmount = roundCurrency(
     payload.subtotalAmount !== undefined ? payload.subtotalAmount : payload.amount
   );
@@ -120,6 +121,7 @@ function csvValue(value) {
 }
 
 function resolveSortOptions(query = {}) {
+  // Whitelist sort fields to avoid invalid/unsafe ORDER BY input.
   const allowedSortFields = new Set([
     'createdAt',
     'updatedAt',
@@ -183,6 +185,7 @@ async function importSalesInvoices(req, res) {
     const errors = [];
 
     for (let index = 0; index < records.length; index += 1) {
+      // Import runs row-by-row to return precise per-line errors.
       const row = records[index];
       const rowNum = index + 2;
       const rowMap = new Map(
@@ -281,7 +284,8 @@ async function importSalesInvoices(req, res) {
             continue;
           }
 
-          // Force import overwrites by invoice number only.
+          // Force import intentionally overwrites by invoice number only.
+          // We avoid overwriting by order linkage to protect order/invoice history.
           if (!duplicateByInvoice) {
             skipped += 1;
             errors.push(`Row ${rowNum}: cannot force overwrite by orderId. Force Import only overwrites by invoiceNumber.`);
@@ -425,6 +429,7 @@ async function listSalesInvoices(req, res) {
       offset,
       order: [
         [sortBy, sortDirection],
+        // Stable secondary sort keeps pagination deterministic.
         ['createdAt', 'DESC'],
       ],
     });

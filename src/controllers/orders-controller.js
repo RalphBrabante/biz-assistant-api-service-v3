@@ -65,6 +65,7 @@ function toFixed3(value) {
 }
 
 function buildSnapshotFromItem(item, orderedItem = {}, vatRate = 0) {
+  // Snapshot rows preserve pricing/tax values at order time so historical orders stay immutable.
   const quantity = toFixed3(orderedItem.quantity || 1);
   const unitPrice = toFixed2(item.price);
   const discountedUnitPrice =
@@ -106,6 +107,8 @@ function buildSnapshotFromItem(item, orderedItem = {}, vatRate = 0) {
 }
 
 function computeOrderTotals(snapshotRows = [], shippingAmount = 0, vatRate = 0) {
+  // Order totals are computed from snapshot lines, not current item rows.
+  // This prevents historical totals from drifting when item prices are changed later.
   const subtotalAmount = toFixed2(
     snapshotRows.reduce((sum, row) => sum + normalizeNumber(row.lineTotal), 0)
   );
@@ -137,6 +140,7 @@ async function resolveWithholdingRate({
   WithholdingTaxType,
   transaction,
 }) {
+  // Withholding tax selection is optional. When omitted, we treat rate as 0.
   const withholdingTaxTypeId = String(requestedWithholdingTaxTypeId || '').trim();
   if (!withholdingTaxTypeId) {
     return { withholdingTaxTypeId: null, withholdingPercentage: 0 };
@@ -170,6 +174,7 @@ function buildStockDemand(entries = [], itemById = new Map()) {
       continue;
     }
 
+    // Services do not consume inventory.
     if (item.type !== 'product') {
       continue;
     }
@@ -341,6 +346,7 @@ async function createOrder(req, res) {
       ensureStockAvailable(itemById, stockDemand);
 
       const computedTotals = computeOrderTotals(snapshotRows, payload.shippingAmount || 0, vatRate);
+      // Withholding is applied on taxable base and deducted from payable total.
       const withholdingAmount = toFixed2(computedTotals.taxableAmount * (withholdingRate / 100));
       payload.subtotalAmount = computedTotals.subtotalAmount;
       payload.taxAmount = computedTotals.taxAmount;
@@ -603,6 +609,7 @@ async function updateOrder(req, res) {
       order.status !== 'confirmed' &&
       order.status !== 'completed' &&
       nextStatus === 'confirmed';
+    // Any item/shipping/withholding change must trigger full total recomputation.
     const shouldRecomputeTotals =
       hasOrderedItemsUpdate ||
       payload.shippingAmount !== undefined ||
@@ -638,6 +645,7 @@ async function updateOrder(req, res) {
       }
 
       if (requestedWithholdingTaxTypeId !== undefined) {
+        // Persist explicit withholding tax selection (or clear it when null/empty).
         try {
           const withholding = await resolveWithholdingRate({
             requestedWithholdingTaxTypeId,
@@ -656,6 +664,7 @@ async function updateOrder(req, res) {
       }
 
       if (hasOrderedItemsUpdate) {
+        // Rebuild snapshots from the submitted item list, then recompute totals atomically.
         if (!Array.isArray(orderedItems) || orderedItems.length === 0) {
           await transaction.rollback();
           return res.status(400).json({
@@ -772,6 +781,7 @@ async function updateOrder(req, res) {
           await applyStockDeduction(itemById, stockDemand, transaction);
         }
       } else if (shouldRecomputeTotals) {
+        // Recompute using existing snapshots when only non-item fields changed.
         const organization = await Organization.findByPk(order.organizationId, {
           include: [
             {
