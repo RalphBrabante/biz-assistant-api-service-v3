@@ -8,10 +8,15 @@ const base = {
   port: Number(process.env.DB_PORT || 3306),
   dialect: 'mysql',
   logging: false,
+  dialectOptions: {
+    connectTimeout: Number(process.env.DB_CONNECT_TIMEOUT_MS || 20000),
+  },
   pool: {
-    max: 10,
-    min: 0,
-    idle: 10000,
+    max: Number(process.env.DB_POOL_MAX || 4),
+    min: Number(process.env.DB_POOL_MIN || 0),
+    acquire: Number(process.env.DB_POOL_ACQUIRE_MS || 20000),
+    idle: Number(process.env.DB_POOL_IDLE_MS || 5000),
+    evict: Number(process.env.DB_POOL_EVICT_MS || 1000),
   },
 };
 

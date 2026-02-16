@@ -39,7 +39,7 @@ const {
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '1mb' }));
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use(errorResponseShapeMiddleware);
 
@@ -80,7 +80,13 @@ async function connectMysqlWithRetry(maxAttempts = 10, delayMs = 3000) {
 }
 
 async function connectRedis() {
-  redisClient = new Redis(process.env.REDIS_URL || 'redis://redis:6379');
+  redisClient = new Redis(process.env.REDIS_URL || 'redis://redis:6379', {
+    maxRetriesPerRequest: 1,
+    enableAutoPipelining: true,
+    lazyConnect: false,
+    connectTimeout: Number(process.env.REDIS_CONNECT_TIMEOUT_MS || 10000),
+    retryStrategy: (attempt) => Math.min(attempt * 200, 2000),
+  });
   await redisClient.ping();
   setRedisClient(redisClient);
   status.redis = true;
@@ -142,9 +148,13 @@ async function bootstrap() {
     console.error('AMQP connection failed:', err.message);
   }
 
-  app.listen(port, () => {
+  // Conservative HTTP timeout tuning for low-resource hosts (1 vCPU).
+  const server = app.listen(port, () => {
     console.log(`API listening on port ${port}`);
   });
+  server.keepAliveTimeout = Number(process.env.HTTP_KEEPALIVE_TIMEOUT_MS || 5000);
+  server.headersTimeout = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 6000);
+  server.requestTimeout = Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 30000);
 }
 
 process.on('SIGINT', async () => {
