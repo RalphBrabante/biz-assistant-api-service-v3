@@ -20,6 +20,39 @@ function hasSuperuserRole(roleCodes) {
   return normalized.includes('superuser');
 }
 
+async function resolveEffectiveOrganizationId(models, user) {
+  if (!models?.OrganizationUser || !user?.id) {
+    return user?.organizationId || null;
+  }
+
+  const primaryMembership = await models.OrganizationUser.findOne({
+    where: {
+      userId: user.id,
+      isActive: true,
+      isPrimary: true,
+    },
+    attributes: ['organizationId'],
+    order: [['updatedAt', 'DESC']],
+  });
+  if (primaryMembership?.organizationId) {
+    return primaryMembership.organizationId;
+  }
+
+  if (user.organizationId) {
+    return user.organizationId;
+  }
+
+  const fallbackMembership = await models.OrganizationUser.findOne({
+    where: {
+      userId: user.id,
+      isActive: true,
+    },
+    attributes: ['organizationId'],
+    order: [['createdAt', 'ASC']],
+  });
+  return fallbackMembership?.organizationId || null;
+}
+
 async function authenticateRequest(req, res, next) {
   try {
     const models = getModels();
@@ -76,6 +109,8 @@ async function authenticateRequest(req, res, next) {
     }
 
     if (new Date(tokenRecord.expiresAt) <= new Date()) {
+      // Remove expired token rows so stale access tokens do not accumulate.
+      await tokenRecord.destroy();
       return res.status(401).json({
         code: 'TOKEN_EXPIRED',
         message: 'Access token has expired.',
@@ -92,23 +127,7 @@ async function authenticateRequest(req, res, next) {
 
     const roles = (user.roles || []).map((role) => role.code);
     const isSuperuser = hasSuperuserRole(roles);
-    let effectiveOrganizationId = user.organizationId || null;
-
-    // Some users are linked via organization_users and may not have users.organization_id populated.
-    // Resolve a fallback organization so license checks and organization scoping still work.
-    if (!effectiveOrganizationId && models.OrganizationUser) {
-      const membership = await models.OrganizationUser.findOne({
-        where: {
-          userId: user.id,
-          isActive: true,
-        },
-        attributes: ['organizationId'],
-        order: [['createdAt', 'ASC']],
-      });
-      if (membership?.organizationId) {
-        effectiveOrganizationId = membership.organizationId;
-      }
-    }
+    const effectiveOrganizationId = await resolveEffectiveOrganizationId(models, user);
 
     // Enforce organization license access for all non-superuser users.
     if (!isSuperuser) {

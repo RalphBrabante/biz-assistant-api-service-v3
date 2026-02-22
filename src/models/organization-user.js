@@ -28,6 +28,11 @@ function initOrganizationUserModel(sequelize) {
         allowNull: false,
         defaultValue: true,
       },
+      isPrimary: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
     },
     {
       sequelize,
@@ -38,6 +43,7 @@ function initOrganizationUserModel(sequelize) {
       indexes: [
         { fields: ['organization_id'] },
         { fields: ['user_id'] },
+        { fields: ['user_id', 'is_primary'] },
         { unique: true, fields: ['organization_id', 'user_id'] },
       ],
     }

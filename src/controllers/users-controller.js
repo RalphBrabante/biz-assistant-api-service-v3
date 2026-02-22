@@ -126,6 +126,43 @@ function sanitizeUser(user) {
   return json;
 }
 
+async function setPrimaryOrganizationMembership(models, userId, organizationId) {
+  if (!models?.OrganizationUser || !userId || !organizationId) {
+    return;
+  }
+
+  await models.OrganizationUser.update(
+    { isPrimary: false },
+    {
+      where: {
+        userId,
+        isPrimary: true,
+      },
+    }
+  );
+
+  await models.OrganizationUser.update(
+    { isPrimary: true, isActive: true },
+    {
+      where: {
+        userId,
+        organizationId,
+      },
+    }
+  );
+
+  if (models.User) {
+    await models.User.update(
+      { organizationId },
+      {
+        where: {
+          id: userId,
+        },
+      }
+    );
+  }
+}
+
 function hasRoleCode(user, roleCodes = [], membershipRole = '') {
   const allowed = roleCodes.map((value) => String(value || '').toLowerCase());
   const primaryRole = String(user?.role || '').toLowerCase();
@@ -308,8 +345,10 @@ async function createUser(req, res) {
         defaults: {
           role: String(payload.role || 'member').toLowerCase(),
           isActive: user.isActive !== false,
+          isPrimary: true,
         },
       });
+      await setPrimaryOrganizationMembership(models, user.id, user.organizationId);
     }
     if (resolvedRoles.length > 0) {
       await UserRole.bulkCreate(
@@ -527,11 +566,13 @@ async function listUsers(req, res) {
 
 async function getUserById(req, res) {
   try {
-    const models = getUserRoleModels();
-    if (!models) {
+    const models = getModels();
+    const roleModels = getUserRoleModels();
+    if (!models || !roleModels || !models.Organization) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { User, Role } = models;
+    const { User, Role } = roleModels;
+    const { Organization } = models;
 
     const where = { id: req.params.id };
     if (!isPrivilegedRequest(req)) {
@@ -549,6 +590,12 @@ async function getUserById(req, res) {
           as: 'roles',
           through: { attributes: ['id', 'assignedByUserId', 'createdAt'] },
         },
+        {
+          model: Organization,
+          as: 'organizations',
+          attributes: ['id', 'name', 'legalName', 'isActive'],
+          through: { attributes: ['id', 'role', 'isActive', 'isPrimary', 'createdAt', 'updatedAt'] },
+        },
       ],
     });
     if (!user) {
@@ -564,8 +611,9 @@ async function getUserById(req, res) {
 
 async function updateUser(req, res) {
   try {
+    const models = getModels();
     const User = getUserModel();
-    if (!User) {
+    if (!User || !models) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
 
@@ -593,6 +641,25 @@ async function updateUser(req, res) {
     }
 
     await user.update(payload);
+
+    // Keep multi-organization primary membership in sync when default organization changes.
+    if (payload.organizationId && models.OrganizationUser) {
+      await models.OrganizationUser.findOrCreate({
+        where: {
+          userId: user.id,
+          organizationId: payload.organizationId,
+        },
+        defaults: {
+          userId: user.id,
+          organizationId: payload.organizationId,
+          role: String(user.role || 'member').toLowerCase(),
+          isActive: true,
+          isPrimary: true,
+        },
+      });
+      await setPrimaryOrganizationMembership(models, user.id, payload.organizationId);
+    }
+
     return res.status(200).json({ ok: true, data: sanitizeUser(user) });
   } catch (err) {
     console.error('Update user error:', err);

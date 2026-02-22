@@ -95,6 +95,41 @@ function sanitizeUser(user) {
   return json;
 }
 
+async function setPrimaryOrganizationMembership(models, userId, organizationId) {
+  if (!models?.OrganizationUser || !models?.User || !userId || !organizationId) {
+    return;
+  }
+
+  await models.OrganizationUser.update(
+    { isPrimary: false },
+    {
+      where: {
+        userId,
+        isPrimary: true,
+      },
+    }
+  );
+
+  await models.OrganizationUser.update(
+    { isPrimary: true, isActive: true },
+    {
+      where: {
+        userId,
+        organizationId,
+      },
+    }
+  );
+
+  await models.User.update(
+    { organizationId },
+    {
+      where: {
+        id: userId,
+      },
+    }
+  );
+}
+
 async function createOrganization(req, res) {
   try {
     const orgModels = getOrganizationModel();
@@ -270,7 +305,7 @@ async function listOrganizationUsers(req, res) {
     }
 
     const users = await organization.getUsers({
-      joinTableAttributes: ['id', 'role', 'isActive', 'createdAt', 'updatedAt'],
+      joinTableAttributes: ['id', 'role', 'isActive', 'isPrimary', 'createdAt', 'updatedAt'],
       order: [['createdAt', 'DESC']],
     });
 
@@ -439,6 +474,14 @@ async function addUserToOrganization(req, res) {
     }
 
     const isActive = req.body?.isActive === undefined ? true : Boolean(req.body.isActive);
+    const requestedIsPrimary = parseBoolean(req.body?.isPrimary);
+    const hasExistingPrimary = await OrganizationUser.count({
+      where: {
+        userId,
+        isPrimary: true,
+      },
+    });
+    const shouldSetPrimary = requestedIsPrimary === true || hasExistingPrimary === 0;
 
     const [membership, created] = await OrganizationUser.findOrCreate({
       where: {
@@ -450,11 +493,21 @@ async function addUserToOrganization(req, res) {
         userId,
         role: resolvedRoleCode,
         isActive,
+        isPrimary: shouldSetPrimary,
       },
     });
 
     if (!created) {
-      await membership.update({ role: resolvedRoleCode, isActive });
+      const nextMembershipPayload = { role: resolvedRoleCode, isActive };
+      if (requestedIsPrimary !== undefined) {
+        nextMembershipPayload.isPrimary = requestedIsPrimary;
+      }
+      await membership.update(nextMembershipPayload);
+    }
+
+    if (shouldSetPrimary || requestedIsPrimary === true) {
+      await setPrimaryOrganizationMembership(models, userId, organization.id);
+      await membership.reload();
     }
 
     if (resolvedRoleId && UserRole) {
@@ -558,6 +611,7 @@ async function addUserToOrganization(req, res) {
         role: membership.role,
         roleId: resolvedRoleId,
         isActive: membership.isActive,
+        isPrimary: membership.isPrimary,
         inviteEmail,
       },
     });
@@ -589,6 +643,17 @@ async function removeUserFromOrganization(req, res) {
       return res.status(404).json({ ok: false, message: 'User not found.' });
     }
 
+    const membership = await OrganizationUser.findOne({
+      where: {
+        organizationId: organization.id,
+        userId: user.id,
+      },
+    });
+    if (!membership) {
+      return res.status(404).json({ ok: false, message: 'User is not a member of this organization.' });
+    }
+
+    const wasPrimary = Boolean(membership.isPrimary);
     const deletedCount = await OrganizationUser.destroy({
       where: {
         organizationId: organization.id,
@@ -596,8 +661,19 @@ async function removeUserFromOrganization(req, res) {
       },
     });
 
-    if (!deletedCount) {
-      return res.status(404).json({ ok: false, message: 'User is not a member of this organization.' });
+    if (wasPrimary) {
+      const nextPrimary = await OrganizationUser.findOne({
+        where: {
+          userId: user.id,
+          isActive: true,
+        },
+        order: [['createdAt', 'ASC']],
+      });
+      if (nextPrimary?.organizationId) {
+        await setPrimaryOrganizationMembership(models, user.id, nextPrimary.organizationId);
+      } else {
+        await User.update({ organizationId: null }, { where: { id: user.id } });
+      }
     }
 
     return res.status(200).json({ ok: true, message: 'User removed from organization.' });

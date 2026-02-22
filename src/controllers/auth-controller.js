@@ -43,6 +43,39 @@ async function comparePassword(plainPassword, storedPassword) {
   }
 }
 
+async function resolveEffectiveOrganizationId(models, user) {
+  if (!models?.OrganizationUser || !user?.id) {
+    return user?.organizationId || null;
+  }
+
+  const primaryMembership = await models.OrganizationUser.findOne({
+    where: {
+      userId: user.id,
+      isActive: true,
+      isPrimary: true,
+    },
+    attributes: ['organizationId'],
+    order: [['updatedAt', 'DESC']],
+  });
+  if (primaryMembership?.organizationId) {
+    return primaryMembership.organizationId;
+  }
+
+  if (user.organizationId) {
+    return user.organizationId;
+  }
+
+  const fallbackMembership = await models.OrganizationUser.findOne({
+    where: {
+      userId: user.id,
+      isActive: true,
+    },
+    attributes: ['organizationId'],
+    order: [['createdAt', 'ASC']],
+  });
+  return fallbackMembership?.organizationId || null;
+}
+
 async function login(req, res) {
   try {
     const { email, password } = req.body || {};
@@ -139,20 +172,7 @@ async function login(req, res) {
       lastLoginAt: new Date(),
     });
 
-    let effectiveOrganizationId = user.organizationId || null;
-    if (!effectiveOrganizationId && models.OrganizationUser) {
-      const membership = await models.OrganizationUser.findOne({
-        where: {
-          userId: user.id,
-          isActive: true,
-        },
-        attributes: ['organizationId'],
-        order: [['createdAt', 'ASC']],
-      });
-      if (membership?.organizationId) {
-        effectiveOrganizationId = membership.organizationId;
-      }
-    }
+    const effectiveOrganizationId = await resolveEffectiveOrganizationId(models, user);
 
     let organizationCurrency = 'USD';
     let organizationName = '';
