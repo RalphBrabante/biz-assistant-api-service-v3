@@ -10,18 +10,20 @@ const {
 
 function getItemModels() {
   const models = getModels();
-  if (!models || !models.Item || !models.Organization) {
+  if (!models || !models.Item || !models.Organization || !models.Vendor) {
     return null;
   }
   return {
     Item: models.Item,
     Organization: models.Organization,
+    Vendor: models.Vendor,
   };
 }
 
 function pickItemPayload(body = {}) {
   return {
     organizationId: body.organizationId,
+    vendorId: body.vendorId,
     type: body.type,
     sku: body.sku,
     name: body.name,
@@ -89,7 +91,7 @@ async function createItem(req, res) {
     if (!models) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { Item } = models;
+    const { Item, Vendor } = models;
 
     const payload = cleanUndefined(pickItemPayload(req.body));
 
@@ -103,6 +105,19 @@ async function createItem(req, res) {
     if (!payload.name) {
       return res.status(400).json({ ok: false, message: 'name is required.' });
     }
+
+    if (payload.vendorId) {
+      const vendor = await Vendor.findOne({
+        where: {
+          id: payload.vendorId,
+          organizationId: payload.organizationId,
+        },
+      });
+      if (!vendor) {
+        return res.status(400).json({ ok: false, message: 'Selected vendor is invalid for this organization.' });
+      }
+    }
+
     payload.currency = await getOrganizationCurrency(payload.organizationId);
 
     const item = await Item.create(payload);
@@ -111,6 +126,11 @@ async function createItem(req, res) {
         {
           association: 'organization',
           attributes: ['id', 'name', 'legalName'],
+          required: false,
+        },
+        {
+          association: 'vendor',
+          attributes: ['id', 'name', 'legalName', 'taxId'],
           required: false,
         },
       ],
@@ -148,6 +168,9 @@ async function listItems(req, res) {
     if (req.query.type) {
       where.type = req.query.type;
     }
+    if (req.query.vendorId) {
+      where.vendorId = req.query.vendorId;
+    }
     const isActive = parseBoolean(req.query.isActive);
     if (isActive !== undefined) {
       where.isActive = isActive;
@@ -157,6 +180,9 @@ async function listItems(req, res) {
         { name: { [Op.like]: `%${req.query.q}%` } },
         { sku: { [Op.like]: `%${req.query.q}%` } },
         { category: { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.name$': { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.legal_name$': { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.tax_id$': { [Op.like]: `%${req.query.q}%` } },
       ];
     }
 
@@ -166,6 +192,11 @@ async function listItems(req, res) {
         {
           association: 'organization',
           attributes: ['id', 'name', 'legalName'],
+          required: false,
+        },
+        {
+          association: 'vendor',
+          attributes: ['id', 'name', 'legalName', 'taxId'],
           required: false,
         },
       ],
@@ -236,6 +267,7 @@ async function importItems(req, res) {
       const payload = cleanUndefined({
         organizationId,
         type: String(row.type || '').trim().toLowerCase() || 'product',
+        vendorId: String(row.vendorId || '').trim() || undefined,
         sku: String(row.sku || '').trim() || undefined,
         name,
         description: String(row.description || '').trim() || undefined,
@@ -254,6 +286,20 @@ async function importItems(req, res) {
       });
 
       try {
+        if (payload.vendorId) {
+          // eslint-disable-next-line no-await-in-loop
+          const vendor = await models.Vendor.findOne({
+            where: {
+              id: payload.vendorId,
+              organizationId,
+            },
+          });
+          if (!vendor) {
+            skipped += 1;
+            errors.push(`Row ${rowNum}: vendorId is invalid for this organization.`);
+            continue;
+          }
+        }
         // eslint-disable-next-line no-await-in-loop
         await Item.create(payload);
         imported += 1;
@@ -300,6 +346,9 @@ async function exportItems(req, res) {
     if (req.query.type) {
       where.type = req.query.type;
     }
+    if (req.query.vendorId) {
+      where.vendorId = req.query.vendorId;
+    }
     const isActive = parseBoolean(req.query.isActive);
     if (isActive !== undefined) {
       where.isActive = isActive;
@@ -309,11 +358,21 @@ async function exportItems(req, res) {
         { name: { [Op.like]: `%${req.query.q}%` } },
         { sku: { [Op.like]: `%${req.query.q}%` } },
         { category: { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.name$': { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.legal_name$': { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.tax_id$': { [Op.like]: `%${req.query.q}%` } },
       ];
     }
 
     const rows = await Item.findAll({
       where,
+      include: [
+        {
+          association: 'vendor',
+          attributes: ['id', 'name', 'legalName', 'taxId'],
+          required: false,
+        },
+      ],
       order: [['createdAt', 'DESC']],
       limit: 10000,
     });
@@ -322,6 +381,8 @@ async function exportItems(req, res) {
       'id',
       'organizationId',
       'type',
+      'vendorId',
+      'vendorName',
       'sku',
       'name',
       'description',
@@ -347,6 +408,8 @@ async function exportItems(req, res) {
           csvValue(json.id),
           csvValue(json.organizationId),
           csvValue(json.type),
+          csvValue(json.vendorId),
+          csvValue(json.vendor?.name || json.vendor?.legalName),
           csvValue(json.sku),
           csvValue(json.name),
           csvValue(json.description),
@@ -401,6 +464,11 @@ async function getItemById(req, res) {
           attributes: ['id', 'name', 'legalName'],
           required: false,
         },
+        {
+          association: 'vendor',
+          attributes: ['id', 'name', 'legalName', 'taxId'],
+          required: false,
+        },
       ],
     });
     if (!item) {
@@ -420,7 +488,7 @@ async function updateItem(req, res) {
     if (!models) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { Item } = models;
+    const { Item, Vendor } = models;
 
     const where = { id: req.params.id };
     if (!isPrivilegedRequest(req)) {
@@ -436,10 +504,26 @@ async function updateItem(req, res) {
     }
 
     const payload = cleanUndefined(pickItemPayload(req.body));
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'vendorId') && !req.body.vendorId) {
+      payload.vendorId = null;
+    }
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ ok: false, message: 'No valid fields provided for update.' });
     }
     const effectiveOrganizationId = payload.organizationId || item.organizationId;
+
+    if (Object.prototype.hasOwnProperty.call(payload, 'vendorId') && payload.vendorId) {
+      const vendor = await Vendor.findOne({
+        where: {
+          id: payload.vendorId,
+          organizationId: effectiveOrganizationId,
+        },
+      });
+      if (!vendor) {
+        return res.status(400).json({ ok: false, message: 'Selected vendor is invalid for this organization.' });
+      }
+    }
+
     payload.currency = await getOrganizationCurrency(effectiveOrganizationId);
 
     if (!isPrivilegedRequest(req)) {
@@ -452,6 +536,11 @@ async function updateItem(req, res) {
         {
           association: 'organization',
           attributes: ['id', 'name', 'legalName'],
+          required: false,
+        },
+        {
+          association: 'vendor',
+          attributes: ['id', 'name', 'legalName', 'taxId'],
           required: false,
         },
       ],

@@ -347,6 +347,26 @@ function initModels(sequelize) {
     as: 'organization',
   });
 
+  Vendor.hasMany(Item, {
+    foreignKey: {
+      name: 'vendorId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'items',
+  });
+
+  Item.belongsTo(Vendor, {
+    foreignKey: {
+      name: 'vendorId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'vendor',
+  });
+
   User.hasMany(Item, {
     foreignKey: {
       name: 'createdBy',

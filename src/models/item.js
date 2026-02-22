@@ -14,6 +14,10 @@ function initItemModel(sequelize) {
         type: DataTypes.UUID,
         allowNull: false,
       },
+      vendorId: {
+        type: DataTypes.UUID,
+        allowNull: true,
+      },
       type: {
         type: DataTypes.ENUM('product', 'service'),
         allowNull: false,
@@ -96,6 +100,7 @@ function initItemModel(sequelize) {
       underscored: true,
       indexes: [
         { fields: ['organization_id'] },
+        { fields: ['vendor_id'] },
         { fields: ['type'] },
         { fields: ['name'] },
         { fields: ['sku'] },
