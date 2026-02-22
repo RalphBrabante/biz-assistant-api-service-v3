@@ -35,6 +35,10 @@ function initUserModel(sequelize) {
         type: DataTypes.STRING(500),
         allowNull: true,
       },
+      profileImageCdnUrl: {
+        type: DataTypes.STRING(1000),
+        allowNull: true,
+      },
       password: {
         type: DataTypes.STRING(255),
         allowNull: false,

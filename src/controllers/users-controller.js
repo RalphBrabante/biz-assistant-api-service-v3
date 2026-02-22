@@ -9,6 +9,7 @@ const {
   createOrganizationMessage,
   getActorDisplayName,
 } = require('../services/message-service');
+const { deleteRemoteFileByUrl } = require('../services/storage-service');
 const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
@@ -53,6 +54,7 @@ function pickUserPayload(body = {}) {
     firstName: body.firstName,
     lastName: body.lastName,
     email: body.email,
+    profileImageCdnUrl: body.profileImageCdnUrl,
     profileImageUrl: body.profileImageUrl,
     password: body.password,
     phone: body.phone,
@@ -721,7 +723,25 @@ async function deleteUser(req, res) {
       return res.status(404).json({ ok: false, message: 'User not found.' });
     }
 
+    const profileImageUrls = Array.from(
+      new Set(
+        [
+          String(user.profileImageCdnUrl || '').trim(),
+          String(user.profileImageUrl || '').trim(),
+        ].filter(Boolean)
+      )
+    );
+
     await user.destroy();
+    for (const fileUrl of profileImageUrls) {
+      try {
+        // Best-effort cleanup after delete.
+        // eslint-disable-next-line no-await-in-loop
+        await deleteRemoteFileByUrl(fileUrl);
+      } catch (_err) {
+        // Best-effort cleanup after delete.
+      }
+    }
     return res.status(200).json({ ok: true, message: 'User deleted successfully.' });
   } catch (err) {
     console.error('Delete user error:', err);

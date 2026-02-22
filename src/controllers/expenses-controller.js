@@ -1,7 +1,14 @@
 const { Op } = require('sequelize');
 const { parse } = require('csv-parse/sync');
+const path = require('path');
 const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
+const {
+  compressImageAtPath,
+  deleteRemoteFileByUrl,
+  uploadImageFromDisk,
+  StorageProviderError,
+} = require('../services/storage-service');
 const {
   createOrganizationMessage,
   getActorDisplayName,
@@ -57,12 +64,27 @@ function pickExpensePayload(body = {}) {
     totalAmount: body.totalAmount,
     receiptUrl: body.receiptUrl,
     file: body.file,
+    fileCdnUrl: body.fileCdnUrl,
     notes: body.notes,
     paidAt: body.paidAt,
     approvedBy: body.approvedBy,
     createdBy: body.createdBy,
     updatedBy: body.updatedBy,
   };
+}
+
+function isRemotePublicUrl(value) {
+  const url = String(value || '').trim();
+  return url.startsWith('http://') || url.startsWith('https://');
+}
+
+function collectExpenseFileUrls(expenseLike = {}) {
+  const candidates = [
+    String(expenseLike.fileCdnUrl || '').trim(),
+    String(expenseLike.file || '').trim(),
+    String(expenseLike.receiptUrl || '').trim(),
+  ].filter(Boolean);
+  return Array.from(new Set(candidates));
 }
 
 function cleanUndefined(payload) {
@@ -301,11 +323,30 @@ async function importExpenses(req, res) {
   }
 }
 
-function resolveUploadedExpenseFile(req) {
+async function resolveUploadedExpenseFile(req) {
   if (!req.file || !req.file.filename) {
     return null;
   }
-  return `/uploads/expenses/${req.file.filename}`;
+
+  const localPath = String(req.file.path || '').trim();
+  if (localPath) {
+    await compressImageAtPath(localPath, 2 * 1024 * 1024);
+    const uploadedUrl = await uploadImageFromDisk(localPath, {
+      folder: 'expenses',
+      fileName: req.file.filename,
+      contentType: req.file.mimetype || undefined,
+    });
+    if (uploadedUrl) {
+      return {
+        file: uploadedUrl,
+        fileCdnUrl: isRemotePublicUrl(uploadedUrl) ? uploadedUrl : null,
+      };
+    }
+  }
+  return {
+    file: `/uploads/expenses/${path.basename(req.file.filename)}`,
+    fileCdnUrl: null,
+  };
 }
 
 async function createExpense(req, res) {
@@ -317,9 +358,10 @@ async function createExpense(req, res) {
 
     const { Expense, Vendor, Organization, WithholdingTaxType } = models;
     const payload = cleanUndefined(pickExpensePayload(req.body));
-    const uploadedFile = resolveUploadedExpenseFile(req);
+    const uploadedFile = await resolveUploadedExpenseFile(req);
     if (uploadedFile) {
-      payload.file = uploadedFile;
+      payload.file = uploadedFile.file;
+      payload.fileCdnUrl = uploadedFile.fileCdnUrl;
     }
     if (!isPrivilegedRequest(req)) {
       payload.organizationId = getAuthenticatedOrganizationId(req);
@@ -441,6 +483,12 @@ async function createExpense(req, res) {
 
     return res.status(201).json({ ok: true, data: created || expense });
   } catch (err) {
+    if (err instanceof StorageProviderError) {
+      return res.status(502).json({
+        code: err.code || 'STORAGE_UPLOAD_ERROR',
+        message: err.message || 'Unable to upload expense attachment to cloud storage.',
+      });
+    }
     console.error('Create expense error:', err);
     return res.status(500).json({ ok: false, message: 'Unable to create expense.' });
   }
@@ -625,6 +673,7 @@ async function exportExpenses(req, res) {
       'totalAmount',
       'notes',
       'file',
+      'fileCdnUrl',
       'createdAt',
       'updatedAt',
     ];
@@ -661,6 +710,7 @@ async function exportExpenses(req, res) {
           csvValue(json.totalAmount),
           csvValue(json.notes),
           csvValue(json.file),
+          csvValue(json.fileCdnUrl),
           csvValue(json.createdAt),
           csvValue(json.updatedAt),
         ].join(',')
@@ -746,9 +796,11 @@ async function updateExpense(req, res) {
     }
 
     const payload = cleanUndefined(pickExpensePayload(req.body));
-    const uploadedFile = resolveUploadedExpenseFile(req);
+    const previousFiles = collectExpenseFileUrls(expense);
+    const uploadedFile = await resolveUploadedExpenseFile(req);
     if (uploadedFile) {
-      payload.file = uploadedFile;
+      payload.file = uploadedFile.file;
+      payload.fileCdnUrl = uploadedFile.fileCdnUrl;
     }
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ ok: false, message: 'No valid fields provided for update.' });
@@ -841,6 +893,19 @@ async function updateExpense(req, res) {
     }
 
     await expense.update(payload);
+    if (payload.file) {
+      const currentFiles = collectExpenseFileUrls(payload);
+      const filesToDelete = previousFiles.filter((url) => !currentFiles.includes(url));
+      for (const fileUrl of filesToDelete) {
+        try {
+          // Best-effort cleanup; keep update successful even if remote deletion fails.
+          // eslint-disable-next-line no-await-in-loop
+          await deleteRemoteFileByUrl(fileUrl);
+        } catch (_err) {
+          // Best-effort cleanup; keep update successful even if remote deletion fails.
+        }
+      }
+    }
     const updated = await Expense.findByPk(expense.id, {
       include: [
         {
@@ -863,6 +928,12 @@ async function updateExpense(req, res) {
 
     return res.status(200).json({ ok: true, data: updated || expense });
   } catch (err) {
+    if (err instanceof StorageProviderError) {
+      return res.status(502).json({
+        code: err.code || 'STORAGE_UPLOAD_ERROR',
+        message: err.message || 'Unable to upload expense attachment to cloud storage.',
+      });
+    }
     console.error('Update expense error:', err);
     return res.status(500).json({ ok: false, message: 'Unable to update expense.' });
   }
@@ -888,7 +959,17 @@ async function deleteExpense(req, res) {
       return res.status(404).json({ ok: false, message: 'Expense not found.' });
     }
 
+    const fileUrls = collectExpenseFileUrls(expense);
     await expense.destroy();
+    for (const fileUrl of fileUrls) {
+      try {
+        // Best-effort cleanup after delete.
+        // eslint-disable-next-line no-await-in-loop
+        await deleteRemoteFileByUrl(fileUrl);
+      } catch (_err) {
+        // Best-effort cleanup after delete.
+      }
+    }
     return res.status(200).json({ ok: true, message: 'Expense deleted successfully.' });
   } catch (err) {
     console.error('Delete expense error:', err);

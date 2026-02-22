@@ -108,6 +108,10 @@ function initExpenseModel(sequelize) {
         type: DataTypes.STRING(500),
         allowNull: true,
       },
+      fileCdnUrl: {
+        type: DataTypes.STRING(1000),
+        allowNull: true,
+      },
       notes: {
         type: DataTypes.TEXT,
         allowNull: true,

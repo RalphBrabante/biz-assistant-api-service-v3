@@ -1,4 +1,11 @@
+const path = require('path');
 const { getModels } = require('../sequelize');
+const {
+  compressImageAtPath,
+  deleteRemoteFileByUrl,
+  uploadImageFromDisk,
+  StorageProviderError,
+} = require('../services/storage-service');
 
 function sanitizeUser(user) {
   const json = user.toJSON();
@@ -11,14 +18,34 @@ function optionalString(value) {
   return cleaned || undefined;
 }
 
-function resolveUploadedProfileImage(req) {
+async function resolveUploadedProfileImage(req) {
   if (!req || !req.file || !req.file.filename) {
     return undefined;
   }
-  return `/uploads/profiles/${req.file.filename}`;
+
+  const localPath = String(req.file.path || '').trim();
+  if (localPath) {
+    await compressImageAtPath(localPath, 2 * 1024 * 1024);
+    const uploadedUrl = await uploadImageFromDisk(localPath, {
+      folder: 'profiles',
+      fileName: req.file.filename,
+      contentType: req.file.mimetype || undefined,
+    });
+    if (uploadedUrl) {
+      return {
+        profileImageUrl: uploadedUrl,
+        profileImageCdnUrl: uploadedUrl,
+      };
+    }
+  }
+
+  return {
+    profileImageUrl: `/uploads/profiles/${path.basename(req.file.filename)}`,
+    profileImageCdnUrl: null,
+  };
 }
 
-function buildProfilePayload(req) {
+async function buildProfilePayload(req) {
   const body = req.body || {};
   const payload = {
     firstName: optionalString(body.firstName),
@@ -38,9 +65,10 @@ function buildProfilePayload(req) {
     payload.password = password;
   }
 
-  const uploadedImage = resolveUploadedProfileImage(req);
+  const uploadedImage = await resolveUploadedProfileImage(req);
   if (uploadedImage) {
-    payload.profileImageUrl = uploadedImage;
+    payload.profileImageUrl = uploadedImage.profileImageUrl;
+    payload.profileImageCdnUrl = uploadedImage.profileImageCdnUrl;
   }
 
   if (payload.email) {
@@ -117,7 +145,15 @@ async function updateMyProfile(req, res) {
       });
     }
 
-    const payload = buildProfilePayload(req);
+    const previousProfileImageUrls = Array.from(
+      new Set(
+        [
+          String(user.profileImageCdnUrl || '').trim(),
+          String(user.profileImageUrl || '').trim(),
+        ].filter(Boolean)
+      )
+    );
+    const payload = await buildProfilePayload(req);
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({
         code: 'VALIDATION_ERROR',
@@ -126,6 +162,30 @@ async function updateMyProfile(req, res) {
     }
 
     await user.update(payload);
+    if (
+      payload.profileImageUrl
+    ) {
+      const newProfileImageUrls = Array.from(
+        new Set(
+          [
+            String(payload.profileImageCdnUrl || '').trim(),
+            String(payload.profileImageUrl || '').trim(),
+          ].filter(Boolean)
+        )
+      );
+      const staleProfileImageUrls = previousProfileImageUrls.filter(
+        (url) => !newProfileImageUrls.includes(url)
+      );
+      for (const staleUrl of staleProfileImageUrls) {
+        try {
+          // Best-effort cleanup; profile update remains successful.
+          // eslint-disable-next-line no-await-in-loop
+          await deleteRemoteFileByUrl(staleUrl);
+        } catch (_err) {
+          // Best-effort cleanup; profile update remains successful.
+        }
+      }
+    }
 
     return res.status(200).json({
       code: 'SUCCESS',
@@ -133,6 +193,12 @@ async function updateMyProfile(req, res) {
       data: sanitizeUser(user),
     });
   } catch (err) {
+    if (err instanceof StorageProviderError) {
+      return res.status(502).json({
+        code: err.code || 'STORAGE_UPLOAD_ERROR',
+        message: err.message || 'Unable to upload profile image to cloud storage.',
+      });
+    }
     return res.status(500).json({
       code: 'PROFILE_UPDATE_ERROR',
       message: 'Unable to update profile.',
