@@ -52,7 +52,13 @@ async function createOrganizationMessage({
 
     const io = getSocketServer();
     if (io) {
-      io.to(`org:${organizationId}`).emit('message.created', {
+      const actorUserId = String(created.createdBy || '').trim();
+      const orgRoom = `org:${organizationId}`;
+      const emitTarget = actorUserId
+        ? io.to(orgRoom).except(`user:${actorUserId}`)
+        : io.to(orgRoom);
+
+      emitTarget.emit('message.created', {
         id: created.id,
         organizationId: created.organizationId,
         entityType: created.entityType,
