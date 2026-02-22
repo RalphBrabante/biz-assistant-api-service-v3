@@ -3,6 +3,10 @@ const { parse } = require('csv-parse/sync');
 const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
 const {
+  createOrganizationMessage,
+  getActorDisplayName,
+} = require('../services/message-service');
+const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
   applyOrganizationWhereScope,
@@ -365,6 +369,20 @@ async function createSalesInvoice(req, res) {
     normalizeInvoiceTotals(payload);
 
     const salesInvoice = await SalesInvoice.create(payload);
+    const actorName = getActorDisplayName(req.auth?.user);
+    await createOrganizationMessage({
+      organizationId: salesInvoice.organizationId,
+      entityType: 'sales_invoice',
+      entityId: salesInvoice.id,
+      title: 'New sales invoice added',
+      message: `${actorName} just created sales invoice "${salesInvoice.invoiceNumber}".`,
+      createdBy: req.auth?.user?.id || req.auth?.userId || null,
+      metadata: {
+        orderId: salesInvoice.orderId || null,
+        totalAmount: salesInvoice.totalAmount || 0,
+        currency: salesInvoice.currency || null,
+      },
+    });
     return res.status(201).json({ ok: true, data: salesInvoice });
   } catch (err) {
     console.error('Create sales invoice error:', err);

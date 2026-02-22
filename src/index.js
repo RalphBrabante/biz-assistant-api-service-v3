@@ -1,7 +1,11 @@
 const express = require('express');
+const http = require('http');
+const crypto = require('crypto');
 const path = require('path');
+const { Op } = require('sequelize');
 const Redis = require('ioredis');
 const amqp = require('amqplib');
+const { Server } = require('socket.io');
 const { authenticateSequelize } = require('./sequelize');
 const authRoutes = require('./routes/auth-routes');
 const systemRoutes = require('./routes/system-routes');
@@ -21,6 +25,7 @@ const settingsRoutes = require('./routes/settings-routes');
 const taxTypesRoutes = require('./routes/tax-types-routes');
 const withholdingTaxTypesRoutes = require('./routes/withholding-tax-types-routes');
 const profileRoutes = require('./routes/profile-routes');
+const messagesRoutes = require('./routes/messages-routes');
 const devRoutes = require('./routes/dev-routes');
 const { authenticateRequest } = require('./middleware/authz');
 const { requestLogger } = require('./middleware/request-logger');
@@ -32,6 +37,12 @@ const {
   setRedisClient,
   initializeCacheConfig,
 } = require('./services/cache-service');
+const { setSocketServer } = require('./services/socket-service');
+const {
+  startLicenseExpiryJob,
+  stopLicenseExpiryJob,
+} = require('./jobs/license-expiry-job');
+const { getModels } = require('./sequelize');
 const {
   errorResponseShapeMiddleware,
   notFoundHandler,
@@ -40,6 +51,7 @@ const {
 
 const app = express();
 const port = process.env.PORT || 3000;
+const httpServer = http.createServer(app);
 
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '1mb' }));
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
@@ -57,6 +69,171 @@ const status = {
 };
 
 app.locals.serviceStatus = status;
+
+function hasSuperuserRole(roleCodes = []) {
+  const normalized = roleCodes.map((code) => String(code || '').toLowerCase());
+  return normalized.includes('superuser');
+}
+
+async function resolveEffectiveOrganizationId(models, user) {
+  if (!models?.OrganizationUser || !user?.id) {
+    return user?.organizationId || null;
+  }
+
+  const primaryMembership = await models.OrganizationUser.findOne({
+    where: {
+      userId: user.id,
+      isActive: true,
+      isPrimary: true,
+    },
+    attributes: ['organizationId'],
+    order: [['updatedAt', 'DESC']],
+  });
+  if (primaryMembership?.organizationId) {
+    return primaryMembership.organizationId;
+  }
+
+  if (user.organizationId) {
+    return user.organizationId;
+  }
+
+  const fallbackMembership = await models.OrganizationUser.findOne({
+    where: {
+      userId: user.id,
+      isActive: true,
+    },
+    attributes: ['organizationId'],
+    order: [['createdAt', 'ASC']],
+  });
+  return fallbackMembership?.organizationId || null;
+}
+
+const io = new Server(httpServer, {
+  path: '/socket.io',
+  cors: {
+    origin: true,
+    credentials: false,
+  },
+  transports: ['websocket', 'polling'],
+});
+
+io.use(async (socket, next) => {
+  try {
+    const models = getModels();
+    if (!models || !models.Token || !models.User || !models.Role || !models.Permission || !models.License) {
+      return next(new Error('Authentication service is not ready.'));
+    }
+
+    const authToken = String(socket.handshake.auth?.token || '').trim();
+    const headerToken = String(socket.handshake.headers?.authorization || '').trim();
+    const bearerToken = headerToken.toLowerCase().startsWith('bearer ')
+      ? headerToken.slice(7).trim()
+      : '';
+    const rawToken = authToken || bearerToken;
+    if (!rawToken) {
+      return next(new Error('Missing bearer token.'));
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const tokenRecord = await models.Token.findOne({
+      where: {
+        tokenHash,
+        isActive: true,
+        revokedAt: null,
+      },
+      include: [
+        {
+          model: models.User,
+          as: 'user',
+          include: [
+            {
+              model: models.Role,
+              as: 'roles',
+              through: { attributes: [] },
+              include: [
+                {
+                  model: models.Permission,
+                  as: 'permissions',
+                  through: { attributes: [] },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    if (!tokenRecord) {
+      return next(new Error('Invalid access token.'));
+    }
+
+    if (new Date(tokenRecord.expiresAt) <= new Date()) {
+      await tokenRecord.destroy();
+      return next(new Error('Access token has expired.'));
+    }
+
+    const user = tokenRecord.user;
+    if (!user || !user.isActive) {
+      return next(new Error('User is inactive or unavailable.'));
+    }
+
+    const roleCodes = (user.roles || []).map((role) => String(role.code || '').toLowerCase());
+    const isSuperuser = hasSuperuserRole(roleCodes);
+    const effectiveOrganizationId = await resolveEffectiveOrganizationId(models, user);
+
+    if (!isSuperuser) {
+      if (!effectiveOrganizationId) {
+        return next(new Error('Organization has no active license.'));
+      }
+
+      const now = new Date();
+      const activeLicense = await models.License.findOne({
+        where: {
+          organizationId: effectiveOrganizationId,
+          isActive: true,
+          status: 'active',
+          revokedAt: null,
+          expiresAt: { [Op.gte]: now },
+        },
+        order: [['expiresAt', 'DESC']],
+      });
+      if (!activeLicense) {
+        return next(new Error('Organization license is missing, revoked, or expired.'));
+      }
+    }
+
+    const requestedOrganizationId = String(socket.handshake.auth?.organizationId || '').trim();
+    const socketOrganizationId =
+      isSuperuser && requestedOrganizationId
+        ? requestedOrganizationId
+        : effectiveOrganizationId || null;
+
+    socket.data.auth = {
+      userId: user.id,
+      roleCodes,
+      organizationId: socketOrganizationId,
+      isSuperuser,
+    };
+
+    return next();
+  } catch (err) {
+    return next(err);
+  }
+});
+
+io.on('connection', (socket) => {
+  const userId = String(socket.data?.auth?.userId || '').trim();
+  const organizationId = String(socket.data?.auth?.organizationId || '').trim();
+
+  if (userId) {
+    socket.join(`user:${userId}`);
+  }
+  if (organizationId) {
+    socket.join(`org:${organizationId}`);
+  }
+});
+
+setSocketServer(io);
 
 async function connectMysql() {
   sequelize = await authenticateSequelize();
@@ -123,6 +300,7 @@ app.use('/api/v1/settings', settingsRoutes);
 app.use('/api/v1/tax-types', taxTypesRoutes);
 app.use('/api/v1/withholding-tax-types', withholdingTaxTypesRoutes);
 app.use('/api/v1/profile', profileRoutes);
+app.use('/api/v1/messages', messagesRoutes);
 app.use('/api/v1', systemRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);
@@ -152,8 +330,10 @@ async function bootstrap() {
     console.error('AMQP connection failed:', err.message);
   }
 
+  startLicenseExpiryJob();
+
   // Conservative HTTP timeout tuning for low-resource hosts (1 vCPU).
-  const server = app.listen(port, () => {
+  const server = httpServer.listen(port, () => {
     console.log(`API listening on port ${port}`);
   });
   server.keepAliveTimeout = Number(process.env.HTTP_KEEPALIVE_TIMEOUT_MS || 5000);
@@ -163,6 +343,7 @@ async function bootstrap() {
 
 process.on('SIGINT', async () => {
   try {
+    stopLicenseExpiryJob();
     if (sequelize) {
       await sequelize.close();
     }

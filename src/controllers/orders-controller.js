@@ -3,6 +3,10 @@ const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
 const { sendOrderCreatedEmail } = require('../services/email-service');
 const {
+  createOrganizationMessage,
+  getActorDisplayName,
+} = require('../services/message-service');
+const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
   getScopedOrganizationId,
@@ -416,6 +420,7 @@ async function createOrder(req, res) {
       ? req.body.orderedItems
       : [];
     const authUser = req.auth?.user || null;
+    const actorName = getActorDisplayName(authUser);
     const requestedOrganizationId = String(req.body?.organizationId || '').trim() || null;
     const organizationId = getScopedOrganizationId(req, requestedOrganizationId) || getAuthenticatedOrganizationId(req);
     const authUserId = authUser?.id || null;
@@ -580,6 +585,21 @@ async function createOrder(req, res) {
         organizationId: order.organizationId,
         actorUserId: authUserId,
         events: createEvents,
+        transaction,
+      });
+
+      await createOrganizationMessage({
+        organizationId: order.organizationId,
+        entityType: 'order',
+        entityId: order.id,
+        title: 'New order added',
+        message: `${actorName} just created order "${order.orderNumber}".`,
+        createdBy: authUserId,
+        metadata: {
+          customerId: order.customerId,
+          totalAmount: order.totalAmount || 0,
+          currency: order.currency || null,
+        },
         transaction,
       });
 
@@ -863,6 +883,7 @@ async function updateOrder(req, res) {
     }
 
     const authUser = req.auth?.user || null;
+    const actorName = getActorDisplayName(authUser);
     const beforeState = {
       status: order.status,
       paymentStatus: order.paymentStatus,
@@ -1172,7 +1193,7 @@ async function updateOrder(req, res) {
           });
         }
 
-        await SalesInvoice.create(
+        const createdSalesInvoice = await SalesInvoice.create(
           {
             organizationId: order.organizationId,
             orderId: order.id,
@@ -1198,6 +1219,21 @@ async function updateOrder(req, res) {
           },
           { transaction }
         );
+
+        await createOrganizationMessage({
+          organizationId: order.organizationId,
+          entityType: 'sales_invoice',
+          entityId: createdSalesInvoice.id,
+          title: 'New sales invoice added',
+          message: `${actorName} just created sales invoice "${salesInvoiceId}".`,
+          createdBy: authUser?.id || order.updatedBy || order.userId || null,
+          metadata: {
+            orderId: order.id,
+            totalAmount: createdSalesInvoice.totalAmount || 0,
+            currency: createdSalesInvoice.currency || null,
+          },
+          transaction,
+        });
 
         pushActivityEvent(activityEvents, {
           actionType: 'sales_invoice_created',

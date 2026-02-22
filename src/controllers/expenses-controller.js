@@ -3,6 +3,10 @@ const { parse } = require('csv-parse/sync');
 const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
 const {
+  createOrganizationMessage,
+  getActorDisplayName,
+} = require('../services/message-service');
+const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
   applyOrganizationWhereScope,
@@ -401,6 +405,20 @@ async function createExpense(req, res) {
     }
 
     const expense = await Expense.create(payload);
+    const actorName = getActorDisplayName(req.auth?.user);
+    await createOrganizationMessage({
+      organizationId: expense.organizationId,
+      entityType: 'expense',
+      entityId: expense.id,
+      title: 'New expense added',
+      message: `${actorName} just created expense "${expense.category}".`,
+      createdBy: req.auth?.user?.id || req.auth?.userId || null,
+      metadata: {
+        amount: expense.amount || 0,
+        currency: expense.currency || null,
+        vendorId: expense.vendorId || null,
+      },
+    });
     const created = await Expense.findByPk(expense.id, {
       include: [
         {

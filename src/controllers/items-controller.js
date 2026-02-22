@@ -3,6 +3,10 @@ const { parse } = require('csv-parse/sync');
 const { getModels } = require('../sequelize');
 const { getOrganizationCurrency } = require('../services/organization-currency');
 const {
+  createOrganizationMessage,
+  getActorDisplayName,
+} = require('../services/message-service');
+const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
   applyOrganizationWhereScope,
@@ -121,6 +125,19 @@ async function createItem(req, res) {
     payload.currency = await getOrganizationCurrency(payload.organizationId);
 
     const item = await Item.create(payload);
+    const actorName = getActorDisplayName(req.auth?.user);
+    await createOrganizationMessage({
+      organizationId: item.organizationId,
+      entityType: 'item',
+      entityId: item.id,
+      title: 'New item added',
+      message: `${actorName} just created item "${item.name}".`,
+      createdBy: req.auth?.user?.id || req.auth?.userId || null,
+      metadata: {
+        sku: item.sku || null,
+        type: item.type || null,
+      },
+    });
     const created = await Item.findByPk(item.id, {
       include: [
         {

@@ -46,6 +46,7 @@ const {
   QuarterlyExpenseReport,
 } = require('./quarterly-expense-report');
 const { initAppSettingModel, AppSetting } = require('./app-setting');
+const { initMessageModel, Message } = require('./message');
 
 function initModels(sequelize) {
   initOrganizationModel(sequelize);
@@ -72,6 +73,7 @@ function initModels(sequelize) {
   initQuarterlySalesReportModel(sequelize);
   initQuarterlyExpenseReportModel(sequelize);
   initAppSettingModel(sequelize);
+  initMessageModel(sequelize);
 
   Organization.hasMany(User, {
     foreignKey: {
@@ -1227,6 +1229,46 @@ function initModels(sequelize) {
     as: 'updatedByUser',
   });
 
+  Organization.hasMany(Message, {
+    foreignKey: {
+      name: 'organizationId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'messages',
+  });
+
+  Message.belongsTo(Organization, {
+    foreignKey: {
+      name: 'organizationId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'organization',
+  });
+
+  User.hasMany(Message, {
+    foreignKey: {
+      name: 'createdBy',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'createdMessages',
+  });
+
+  Message.belongsTo(User, {
+    foreignKey: {
+      name: 'createdBy',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'creator',
+  });
+
   return {
     Organization,
     User,
@@ -1252,6 +1294,7 @@ function initModels(sequelize) {
     QuarterlySalesReport,
     QuarterlyExpenseReport,
     AppSetting,
+    Message,
   };
 }
 

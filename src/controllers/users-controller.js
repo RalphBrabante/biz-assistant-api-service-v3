@@ -6,6 +6,10 @@ const {
   sendUserCreatedAdminNotificationEmail,
 } = require('../services/email-service');
 const {
+  createOrganizationMessage,
+  getActorDisplayName,
+} = require('../services/message-service');
+const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
   applyOrganizationWhereScope,
@@ -28,6 +32,18 @@ function getUserRoleModels() {
     User: models.User,
     Role: models.Role,
     UserRole: models.UserRole,
+  };
+}
+
+function getUserOrganizationModels() {
+  const models = getModels();
+  if (!models || !models.User || !models.Organization || !models.OrganizationUser) {
+    return null;
+  }
+  return {
+    User: models.User,
+    Organization: models.Organization,
+    OrganizationUser: models.OrganizationUser,
   };
 }
 
@@ -477,6 +493,22 @@ async function createUser(req, res) {
       console.error('Create user admin notification error:', notifyErr);
     }
 
+    const actorName = getActorDisplayName(req.auth?.user);
+    const createdUserName =
+      [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || user.email;
+    await createOrganizationMessage({
+      organizationId: user.organizationId,
+      entityType: 'user',
+      entityId: user.id,
+      title: 'New user added',
+      message: `${actorName} just created user "${createdUserName}".`,
+      createdBy: req.auth?.user?.id || req.auth?.userId || null,
+      metadata: {
+        email: user.email || null,
+        roles: resolvedRoles.map((role) => String(role.code || '').toLowerCase()),
+      },
+    });
+
     return res.status(201).json({
       ok: true,
       message: 'User created successfully.',
@@ -631,6 +663,9 @@ async function updateUser(req, res) {
 
     const payload = cleanUndefined(pickUserPayload(req.body));
     if (!isPrivilegedRequest(req)) {
+      delete payload.organizationId;
+    }
+    if (payload.organizationId && !isRequesterSuperuser(req)) {
       delete payload.organizationId;
     }
     if (payload.email) {
@@ -834,6 +869,225 @@ async function removeRoleFromUser(req, res) {
   }
 }
 
+async function listUserAssignableOrganizations(req, res) {
+  try {
+    if (!isRequesterSuperuser(req)) {
+      return res.status(403).json({
+        ok: false,
+        message: 'Only superusers can manage user organization memberships.',
+      });
+    }
+
+    const models = getUserOrganizationModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+    const { User, Organization } = models;
+
+    const user = await User.findByPk(req.params.id, {
+      include: [
+        {
+          model: Organization,
+          as: 'organizations',
+          attributes: ['id'],
+          through: { attributes: [] },
+          required: false,
+        },
+      ],
+    });
+    if (!user) {
+      return res.status(404).json({ ok: false, message: 'User not found.' });
+    }
+
+    const assignedIds = new Set((user.organizations || []).map((org) => org.id));
+    const q = String(req.query?.q || '').trim();
+    const where = {
+      isActive: true,
+    };
+    if (q) {
+      where[Op.or] = [
+        { name: { [Op.like]: `%${q}%` } },
+        { legalName: { [Op.like]: `%${q}%` } },
+        { taxId: { [Op.like]: `%${q}%` } },
+      ];
+    }
+
+    const organizations = await Organization.findAll({
+      where,
+      attributes: ['id', 'name', 'legalName', 'taxId', 'isActive'],
+      order: [['name', 'ASC']],
+      limit: 500,
+    });
+
+    const data = organizations.filter((organization) => !assignedIds.has(organization.id));
+    return res.status(200).json({
+      ok: true,
+      data,
+      meta: {
+        total: data.length,
+      },
+    });
+  } catch (err) {
+    console.error('List assignable organizations error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to fetch assignable organizations.' });
+  }
+}
+
+async function addOrganizationToUser(req, res) {
+  try {
+    if (!isRequesterSuperuser(req)) {
+      return res.status(403).json({
+        ok: false,
+        message: 'Only superusers can manage user organization memberships.',
+      });
+    }
+
+    const models = getUserOrganizationModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+    const { User, Organization, OrganizationUser } = models;
+
+    const user = await User.findByPk(req.params.id);
+    if (!user) {
+      return res.status(404).json({ ok: false, message: 'User not found.' });
+    }
+
+    const organizationId = String(req.body?.organizationId || '').trim();
+    if (!organizationId) {
+      return res.status(400).json({ ok: false, message: 'organizationId is required.' });
+    }
+
+    const organization = await Organization.findOne({
+      where: {
+        id: organizationId,
+        isActive: true,
+      },
+    });
+    if (!organization) {
+      return res.status(404).json({ ok: false, message: 'Organization not found or inactive.' });
+    }
+
+    const requestedIsPrimary = parseBoolean(req.body?.isPrimary);
+    const hasExistingPrimary = await OrganizationUser.count({
+      where: {
+        userId: user.id,
+        isPrimary: true,
+      },
+    });
+    const shouldSetPrimary = requestedIsPrimary === true || hasExistingPrimary === 0;
+
+    const [membership, created] = await OrganizationUser.findOrCreate({
+      where: {
+        userId: user.id,
+        organizationId: organization.id,
+      },
+      defaults: {
+        userId: user.id,
+        organizationId: organization.id,
+        role: String(user.role || 'member').toLowerCase(),
+        isActive: true,
+        isPrimary: shouldSetPrimary,
+      },
+    });
+
+    if (!created) {
+      const nextPayload = { isActive: true };
+      if (requestedIsPrimary !== undefined) {
+        nextPayload.isPrimary = requestedIsPrimary;
+      }
+      await membership.update(nextPayload);
+    }
+
+    if (shouldSetPrimary || requestedIsPrimary === true) {
+      await setPrimaryOrganizationMembership(getModels(), user.id, organization.id);
+      await membership.reload();
+    }
+
+    return res.status(created ? 201 : 200).json({
+      ok: true,
+      message: created ? 'Organization assigned to user.' : 'Organization membership updated.',
+      data: {
+        id: membership.id,
+        userId: membership.userId,
+        organizationId: membership.organizationId,
+        isPrimary: membership.isPrimary,
+        isActive: membership.isActive,
+      },
+    });
+  } catch (err) {
+    console.error('Add organization to user error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to assign organization to user.' });
+  }
+}
+
+async function removeOrganizationFromUser(req, res) {
+  try {
+    if (!isRequesterSuperuser(req)) {
+      return res.status(403).json({
+        ok: false,
+        message: 'Only superusers can manage user organization memberships.',
+      });
+    }
+
+    const models = getUserOrganizationModels();
+    if (!models) {
+      return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    }
+    const { User, OrganizationUser } = models;
+
+    const user = await User.findByPk(req.params.id);
+    if (!user) {
+      return res.status(404).json({ ok: false, message: 'User not found.' });
+    }
+
+    const organizationId = String(req.params.organizationId || '').trim();
+    if (!organizationId) {
+      return res.status(400).json({ ok: false, message: 'organizationId is required.' });
+    }
+
+    const membership = await OrganizationUser.findOne({
+      where: {
+        userId: user.id,
+        organizationId,
+      },
+    });
+    if (!membership) {
+      return res.status(404).json({ ok: false, message: 'User is not assigned to this organization.' });
+    }
+
+    const wasPrimary = Boolean(membership.isPrimary);
+    await membership.destroy();
+
+    if (wasPrimary) {
+      const nextPrimary = await OrganizationUser.findOne({
+        where: {
+          userId: user.id,
+          isActive: true,
+        },
+        order: [['createdAt', 'ASC']],
+      });
+      if (nextPrimary?.organizationId) {
+        await setPrimaryOrganizationMembership(getModels(), user.id, nextPrimary.organizationId);
+      } else {
+        await User.update(
+          { organizationId: null },
+          {
+            where: {
+              id: user.id,
+            },
+          }
+        );
+      }
+    }
+
+    return res.status(200).json({ ok: true, message: 'Organization removed from user.' });
+  } catch (err) {
+    console.error('Remove organization from user error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to remove organization from user.' });
+  }
+}
+
 module.exports = {
   createUser,
   listUsers,
@@ -843,4 +1097,7 @@ module.exports = {
   listUserAssignableRoles,
   addRoleToUser,
   removeRoleFromUser,
+  listUserAssignableOrganizations,
+  addOrganizationToUser,
+  removeOrganizationFromUser,
 };

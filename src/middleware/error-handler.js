@@ -92,11 +92,20 @@ function errorResponseShapeMiddleware(req, res, next) {
   res.json = (body) => {
     if (res.statusCode >= 400) {
       if (body && typeof body === 'object' && body.code && body.message) {
-        return originalJson({ code: body.code, message: body.message });
+        const errorResponse = { code: body.code, message: body.message };
+        if (Object.prototype.hasOwnProperty.call(body, 'data')) {
+          errorResponse.data = body.data;
+        }
+        if (Object.prototype.hasOwnProperty.call(body, 'meta')) {
+          errorResponse.meta = body.meta;
+        }
+        return originalJson(errorResponse);
       }
 
       const code = statusToCode(res.statusCode);
       let message = 'Request failed.';
+      let data;
+      let meta;
 
       if (typeof body === 'string') {
         message = body;
@@ -106,9 +115,24 @@ function errorResponseShapeMiddleware(req, res, next) {
         } else if (body.error && typeof body.error.message === 'string') {
           message = body.error.message;
         }
+
+        if (Object.prototype.hasOwnProperty.call(body, 'data')) {
+          data = body.data;
+        }
+        if (Object.prototype.hasOwnProperty.call(body, 'meta')) {
+          meta = body.meta;
+        }
       }
 
-      return originalJson({ code, message });
+      const errorResponse = { code, message };
+      if (data !== undefined) {
+        errorResponse.data = data;
+      }
+      if (meta !== undefined) {
+        errorResponse.meta = meta;
+      }
+
+      return originalJson(errorResponse);
     }
 
     if (body && typeof body === 'object' && body.code && body.message) {

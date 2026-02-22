@@ -2,6 +2,10 @@ const { Op } = require('sequelize');
 const { parse } = require('csv-parse/sync');
 const { getModels } = require('../sequelize');
 const {
+  createOrganizationMessage,
+  getActorDisplayName,
+} = require('../services/message-service');
+const {
   isPrivilegedRequest,
   getAuthenticatedOrganizationId,
   applyOrganizationWhereScope,
@@ -322,6 +326,19 @@ async function createCustomer(req, res) {
     }
 
     const customer = await Customer.create(payload);
+    const actorName = getActorDisplayName(req.auth?.user);
+    await createOrganizationMessage({
+      organizationId: customer.organizationId,
+      entityType: 'customer',
+      entityId: customer.id,
+      title: 'New customer added',
+      message: `${actorName} just created customer "${customer.name}".`,
+      createdBy: req.auth?.user?.id || req.auth?.userId || null,
+      metadata: {
+        taxId: customer.taxId || null,
+        customerCode: customer.customerCode || null,
+      },
+    });
     return res.status(201).json({ ok: true, data: customer });
   } catch (err) {
     console.error('Create customer error:', err);

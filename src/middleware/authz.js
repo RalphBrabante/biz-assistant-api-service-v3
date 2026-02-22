@@ -53,6 +53,21 @@ async function resolveEffectiveOrganizationId(models, user) {
   return fallbackMembership?.organizationId || null;
 }
 
+async function userHasActiveOrganizationMembership(models, userId, organizationId) {
+  if (!models?.OrganizationUser || !userId || !organizationId) {
+    return false;
+  }
+  const membership = await models.OrganizationUser.findOne({
+    where: {
+      userId,
+      organizationId,
+      isActive: true,
+    },
+    attributes: ['id'],
+  });
+  return Boolean(membership);
+}
+
 async function authenticateRequest(req, res, next) {
   try {
     const models = getModels();
@@ -127,7 +142,23 @@ async function authenticateRequest(req, res, next) {
 
     const roles = (user.roles || []).map((role) => role.code);
     const isSuperuser = hasSuperuserRole(roles);
-    const effectiveOrganizationId = await resolveEffectiveOrganizationId(models, user);
+    const tokenOrganizationId = String(tokenRecord?.metadata?.organizationId || '').trim();
+    let effectiveOrganizationId = tokenOrganizationId || (await resolveEffectiveOrganizationId(models, user));
+
+    if (!isSuperuser && tokenOrganizationId) {
+      const hasMembership = await userHasActiveOrganizationMembership(
+        models,
+        user.id,
+        tokenOrganizationId
+      );
+      if (!hasMembership && user.organizationId !== tokenOrganizationId) {
+        return res.status(401).json({
+          code: 'UNAUTHORIZED',
+          message: 'Token organization scope is no longer valid for this user.',
+        });
+      }
+      effectiveOrganizationId = tokenOrganizationId;
+    }
 
     // Enforce organization license access for all non-superuser users.
     if (!isSuperuser) {

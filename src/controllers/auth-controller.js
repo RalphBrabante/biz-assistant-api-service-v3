@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { Op } = require('sequelize');
 const { getModels } = require('../sequelize');
 const {
   sendPasswordResetEmail,
@@ -76,9 +77,88 @@ async function resolveEffectiveOrganizationId(models, user) {
   return fallbackMembership?.organizationId || null;
 }
 
+async function listUserActiveOrganizations(models, user) {
+  const userId = user?.id;
+  if (!models || !userId || !models.Organization) {
+    return [];
+  }
+
+  const organizationIds = new Set();
+  if (models.OrganizationUser) {
+    const memberships = await models.OrganizationUser.findAll({
+      where: {
+        userId,
+        isActive: {
+          [Op.ne]: false,
+        },
+      },
+      attributes: ['organizationId', 'isPrimary', 'createdAt'],
+      order: [
+        ['isPrimary', 'DESC'],
+        ['createdAt', 'ASC'],
+      ],
+    });
+    for (const membership of memberships) {
+      if (membership?.organizationId) {
+        organizationIds.add(membership.organizationId);
+      }
+    }
+  }
+
+  if (user.organizationId) {
+    organizationIds.add(user.organizationId);
+  }
+
+  const ids = Array.from(organizationIds);
+  if (ids.length === 0) {
+    return [];
+  }
+
+  const organizations = await models.Organization.findAll({
+    where: {
+      id: ids,
+      isActive: {
+        [Op.ne]: false,
+      },
+    },
+    attributes: ['id', 'name', 'legalName', 'currency', 'isActive'],
+    order: [['name', 'ASC']],
+  });
+
+  return organizations;
+}
+
+async function mapOrganizationLicenseStatus(models, organizationIds, now = new Date()) {
+  const result = new Map();
+  if (!models?.License || !organizationIds || organizationIds.length === 0) {
+    return result;
+  }
+
+  const activeLicenses = await models.License.findAll({
+    where: {
+      organizationId: organizationIds,
+      isActive: true,
+      status: 'active',
+      revokedAt: null,
+      expiresAt: { [Op.gte]: now },
+    },
+    attributes: ['id', 'organizationId', 'expiresAt'],
+    order: [['expiresAt', 'DESC']],
+  });
+
+  for (const license of activeLicenses) {
+    if (!result.has(license.organizationId)) {
+      result.set(license.organizationId, license);
+    }
+  }
+
+  return result;
+}
+
 async function login(req, res) {
   try {
     const { email, password } = req.body || {};
+    const requestedOrganizationId = String(req.body?.organizationId || '').trim();
 
     if (!email || !password) {
       return res.status(400).json({
@@ -147,6 +227,107 @@ async function login(req, res) {
       });
     }
 
+    const roleCodes = (user.roles || []).map((role) =>
+      String(role.code || '').toLowerCase()
+    );
+    const isSuperuser = roleCodes.includes('superuser');
+
+    let effectiveOrganizationId = null;
+    let organizationName = '';
+    let organizationLegalName = '';
+    let organizationCurrency = 'USD';
+
+    if (!isSuperuser) {
+      const organizations = await listUserActiveOrganizations(models, user);
+      if (organizations.length === 0) {
+        return res.status(403).json({
+          code: 'LICENSE_INACTIVE',
+          message: 'No active organization membership found for this user.',
+        });
+      }
+
+      const organizationIds = organizations.map((organization) => organization.id);
+      const licenseMap = await mapOrganizationLicenseStatus(models, organizationIds, new Date());
+      const selectableOrganizations = organizations.map((organization) => {
+        const hasActiveLicense = licenseMap.has(organization.id);
+        return {
+          id: organization.id,
+          name: organization.name || '',
+          legalName: organization.legalName || '',
+          currency: String(organization.currency || 'USD').toUpperCase().slice(0, 3) || 'USD',
+          hasActiveLicense,
+          licenseStatusReason: hasActiveLicense ? null : 'License missing, revoked, or expired.',
+        };
+      });
+
+      const licensedOrganizations = selectableOrganizations.filter(
+        (organization) => organization.hasActiveLicense
+      );
+      if (licensedOrganizations.length === 0) {
+        return res.status(403).json({
+          code: 'LICENSE_INACTIVE',
+          message: 'None of your assigned organizations has an active license.',
+        });
+      }
+
+      if (!requestedOrganizationId && licensedOrganizations.length > 1) {
+        const suggestedOrganizationId = await resolveEffectiveOrganizationId(models, user);
+        const suggestedLicensedOrganization = licensedOrganizations.find(
+          (organization) => organization.id === suggestedOrganizationId
+        );
+        return res.status(409).json({
+          ok: false,
+          code: 'ORGANIZATION_SELECTION_REQUIRED',
+          message: 'Select an organization to continue login.',
+          data: {
+            requiresOrganizationSelection: true,
+            organizations: licensedOrganizations,
+            suggestedOrganizationId:
+              String(suggestedLicensedOrganization?.id || '').trim() || null,
+          },
+        });
+      }
+
+      const targetOrganizationId =
+        requestedOrganizationId ||
+        (licensedOrganizations.length === 1 ? licensedOrganizations[0].id : null) ||
+        (await resolveEffectiveOrganizationId(models, user));
+
+      const selectedOrganization = licensedOrganizations.find(
+        (organization) => organization.id === targetOrganizationId
+      );
+
+      if (!selectedOrganization) {
+        return res.status(403).json({
+          code: 'ORGANIZATION_ACCESS_DENIED',
+          message: 'Selected organization is invalid for this user.',
+        });
+      }
+
+      if (!selectedOrganization.hasActiveLicense) {
+        return res.status(403).json({
+          code: 'LICENSE_INACTIVE',
+          message: 'Selected organization has no active license.',
+        });
+      }
+
+      effectiveOrganizationId = selectedOrganization.id;
+      organizationName = String(selectedOrganization.name || '').trim();
+      organizationLegalName = String(selectedOrganization.legalName || '').trim();
+      organizationCurrency = selectedOrganization.currency;
+    } else {
+      effectiveOrganizationId = await resolveEffectiveOrganizationId(models, user);
+
+      if (effectiveOrganizationId && models.Organization) {
+        const organization = await models.Organization.findByPk(effectiveOrganizationId, {
+          attributes: ['id', 'name', 'legalName', 'currency'],
+        });
+        organizationCurrency = String(organization?.currency || 'USD').toUpperCase().slice(0, 3) || 'USD';
+        organizationName = String(organization?.name || '').trim();
+        organizationLegalName = String(organization?.legalName || '').trim();
+      }
+    }
+
     const rawToken = crypto.randomBytes(48).toString('hex');
     const tokenHash = crypto
       .createHash('sha256')
@@ -164,6 +345,7 @@ async function login(req, res) {
       userAgent: req.get('user-agent') || null,
       metadata: {
         loginMethod: 'password',
+        organizationId: effectiveOrganizationId || null,
       },
       isActive: true,
     });
@@ -172,23 +354,6 @@ async function login(req, res) {
       lastLoginAt: new Date(),
     });
 
-    const effectiveOrganizationId = await resolveEffectiveOrganizationId(models, user);
-
-    let organizationCurrency = 'USD';
-    let organizationName = '';
-    let organizationLegalName = '';
-    if (effectiveOrganizationId && models.Organization) {
-      const organization = await models.Organization.findByPk(effectiveOrganizationId, {
-        attributes: ['id', 'name', 'legalName', 'currency'],
-      });
-      organizationCurrency = String(organization?.currency || 'USD').toUpperCase().slice(0, 3) || 'USD';
-      organizationName = String(organization?.name || '').trim();
-      organizationLegalName = String(organization?.legalName || '').trim();
-    }
-
-    const roleCodes = (user.roles || []).map((role) =>
-      String(role.code || '').toLowerCase()
-    );
     const permissionCodes = [];
     for (const role of user.roles || []) {
       for (const permission of role.permissions || []) {
