@@ -467,10 +467,6 @@ async function handleGoogleDriveCallback(req, res) {
     res.redirect(buildAppUrl(`${returnPath}?gdrive=${encodeURIComponent(reason)}`));
 
   try {
-    if (!isSuperuser(req)) {
-      return failRedirect('forbidden');
-    }
-
     const code = String(req.query?.code || '').trim();
     const state = String(req.query?.state || '').trim();
     const oauthError = String(req.query?.error || '').trim();
@@ -500,9 +496,6 @@ async function handleGoogleDriveCallback(req, res) {
     const returnPath = getSettingsReturnPath(decodedState?.returnPath || savedState?.returnPath || '/settings');
     if (!savedState || !decodedState || savedState.nonce !== decodedState.nonce) {
       return failRedirect('invalid_state', returnPath);
-    }
-    if (savedState.userId && savedState.userId !== req.auth?.userId) {
-      return failRedirect('invalid_state_user', returnPath);
     }
 
     const stateExpiry = Date.parse(String(savedState.expiresAt || ''));
@@ -555,7 +548,7 @@ async function handleGoogleDriveCallback(req, res) {
 
     const expiresIn = Number(tokenData.expires_in || 0);
     const expiryDate = expiresIn > 0 ? new Date(Date.now() + expiresIn * 1000).toISOString() : '';
-    const updatedBy = req.auth?.userId || null;
+    const updatedBy = null;
 
     await upsertTextSetting(
       models.AppSetting,

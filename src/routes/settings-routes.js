@@ -17,7 +17,7 @@ router.put('/cache', authorize('settings.update'), updateCacheSetting);
 router.get('/storage', authorize('settings.update'), getStorageSetting);
 router.put('/storage', authorize('settings.update'), updateStorageSetting);
 router.get('/storage/google-drive/auth-url', authorize('settings.update'), getGoogleDriveAuthUrl);
-router.get('/storage/google-drive/callback', authorize('settings.update'), handleGoogleDriveCallback);
+router.get('/storage/google-drive/callback', handleGoogleDriveCallback);
 router.post('/storage/google-drive/disconnect', authorize('settings.update'), disconnectGoogleDrive);
 
 module.exports = router;
