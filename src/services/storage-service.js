@@ -394,13 +394,15 @@ async function ensureGoogleDrivePublicReadable(fileId, authHeader) {
       }),
     }
   );
-  if (!response.ok && response.status !== 409) {
-    const data = await response.json().catch(() => ({}));
-    throw new StorageProviderError(
-      'GOOGLE_DRIVE_PERMISSION_ERROR',
-      String(data?.error?.message || 'Unable to set Google Drive file permission.')
-    );
+  if (response.ok || response.status === 409) {
+    return { ok: true, reason: null };
   }
+  const data = await response.json().catch(() => ({}));
+  return {
+    ok: false,
+    reason: String(data?.error?.message || 'Unable to set Google Drive file permission.'),
+    status: Number(response.status || 0) || null,
+  };
 }
 
 async function uploadImageFromDisk(localPath, options = {}) {
@@ -415,9 +417,13 @@ async function uploadImageFromDisk(localPath, options = {}) {
     const fileName = String(options.fileName || `upload-${Date.now()}`).trim();
     const folder = trimOrEmpty(options.folder || 'uploads');
     const mimeType = options.contentType || 'application/octet-stream';
+    const safeFileName = fileName.replace(/[\\/]/g, '-');
+    const driveFileName = folder
+      ? `${folder.replace(/^\/+|\/+$/g, '').replace(/[\\/]/g, '-')}-${safeFileName}`
+      : safeFileName;
 
     const metadata = {
-      name: fileName,
+      name: driveFileName,
     };
 
     const parentId = trimOrEmpty(config.googleDrive.folderId);
@@ -432,7 +438,7 @@ async function uploadImageFromDisk(localPath, options = {}) {
       '',
       JSON.stringify({
         ...metadata,
-        name: folder ? `${folder.replace(/^\/+|\/+$/g, '')}/${fileName}` : fileName,
+        name: driveFileName,
       }),
       `--${boundary}`,
       `Content-Type: ${mimeType}`,
@@ -470,7 +476,15 @@ async function uploadImageFromDisk(localPath, options = {}) {
         'Google Drive upload did not return a file id.'
       );
     }
-    await ensureGoogleDrivePublicReadable(fileId, authHeader);
+    const permissionResult = await ensureGoogleDrivePublicReadable(fileId, authHeader);
+    if (!permissionResult.ok) {
+      // Keep upload successful even when domain policy blocks "anyone with link".
+      logStorageDev('warn', 'Google Drive uploaded but public permission was not applied', {
+        fileId,
+        reason: permissionResult.reason,
+        httpStatusCode: permissionResult.status || null,
+      });
+    }
     await fs.promises.unlink(localPath).catch(() => undefined);
     return buildGoogleDrivePublicUrl(fileId);
   }
