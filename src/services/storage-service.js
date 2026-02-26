@@ -1,4 +1,5 @@
 const fs = require('fs');
+const crypto = require('crypto');
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getModels } = require('../sequelize');
 
@@ -33,11 +34,22 @@ const STORAGE_KEYS = {
   secretKey: 'do_spaces_secret_key',
   cdnBaseUrl: 'do_spaces_cdn_base_url',
   directory: 'do_spaces_directory',
+  googleDriveClientId: 'google_drive_client_id',
+  googleDriveClientSecret: 'google_drive_client_secret',
+  googleDriveRedirectUri: 'google_drive_redirect_uri',
+  googleDriveFolderId: 'google_drive_folder_id',
+  googleDriveAccessToken: 'google_drive_access_token',
+  googleDriveRefreshToken: 'google_drive_refresh_token',
+  googleDriveTokenType: 'google_drive_token_type',
+  googleDriveExpiryDate: 'google_drive_expiry_date',
+  googleDriveScope: 'google_drive_scope',
+  googleDriveAccountEmail: 'google_drive_account_email',
+  googleDriveOauthState: 'google_drive_oauth_state',
 };
 
 function normalizeProvider(value) {
   const provider = String(value || 'local').trim().toLowerCase();
-  return provider === 'do_spaces' ? 'do_spaces' : 'local';
+  return ['do_spaces', 'google_drive'].includes(provider) ? provider : 'local';
 }
 
 function trimOrEmpty(value) {
@@ -94,10 +106,39 @@ async function getStorageConfig() {
       doSpaces.secretKey
   );
 
+  const googleDrive = {
+    clientId:
+      trimOrEmpty(settings[STORAGE_KEYS.googleDriveClientId]) ||
+      trimOrEmpty(process.env.GOOGLE_DRIVE_CLIENT_ID),
+    clientSecret:
+      trimOrEmpty(settings[STORAGE_KEYS.googleDriveClientSecret]) ||
+      trimOrEmpty(process.env.GOOGLE_DRIVE_CLIENT_SECRET),
+    redirectUri:
+      trimOrEmpty(settings[STORAGE_KEYS.googleDriveRedirectUri]) ||
+      trimOrEmpty(process.env.GOOGLE_DRIVE_REDIRECT_URI) ||
+      `${String(process.env.APP_BASE_URL || 'http://localhost').trim().replace(/\/+$/, '')}/api/v1/settings/storage/google-drive/callback`,
+    folderId:
+      trimOrEmpty(settings[STORAGE_KEYS.googleDriveFolderId]) ||
+      trimOrEmpty(process.env.GOOGLE_DRIVE_FOLDER_ID),
+    accessToken: trimOrEmpty(settings[STORAGE_KEYS.googleDriveAccessToken]),
+    refreshToken: trimOrEmpty(settings[STORAGE_KEYS.googleDriveRefreshToken]),
+    tokenType: trimOrEmpty(settings[STORAGE_KEYS.googleDriveTokenType]) || 'Bearer',
+    expiryDate: trimOrEmpty(settings[STORAGE_KEYS.googleDriveExpiryDate]),
+    scope: trimOrEmpty(settings[STORAGE_KEYS.googleDriveScope]),
+    accountEmail: trimOrEmpty(settings[STORAGE_KEYS.googleDriveAccountEmail]),
+    oauthState: trimOrEmpty(settings[STORAGE_KEYS.googleDriveOauthState]),
+  };
+
+  const isGoogleDriveConfigured = Boolean(
+    googleDrive.clientId && googleDrive.clientSecret && googleDrive.refreshToken
+  );
+
   return {
     provider,
     doSpaces,
     isDoSpacesConfigured,
+    googleDrive,
+    isGoogleDriveConfigured,
   };
 }
 
@@ -212,8 +253,228 @@ function describeStorageError(err) {
   return message || 'DigitalOcean Spaces upload failed.';
 }
 
+function buildGoogleDrivePublicUrl(fileId) {
+  const id = trimOrEmpty(fileId);
+  if (!id) {
+    return '';
+  }
+  return `https://drive.google.com/uc?id=${encodeURIComponent(id)}`;
+}
+
+function extractGoogleDriveFileId(fileUrl) {
+  const raw = trimOrEmpty(fileUrl);
+  if (!raw) {
+    return '';
+  }
+  try {
+    const parsed = new URL(raw);
+    if (parsed.hostname === 'drive.google.com') {
+      const directId = parsed.searchParams.get('id');
+      if (directId) {
+        return directId;
+      }
+      const pathMatch = parsed.pathname.match(/\/file\/d\/([^/]+)/i);
+      if (pathMatch?.[1]) {
+        return pathMatch[1];
+      }
+    }
+  } catch (_err) {
+    return '';
+  }
+  return '';
+}
+
+async function fetchGoogleOauthToken({ clientId, clientSecret, redirectUri, code, refreshToken }) {
+  const params = new URLSearchParams();
+  params.set('client_id', clientId);
+  params.set('client_secret', clientSecret);
+  if (code) {
+    params.set('code', code);
+    params.set('grant_type', 'authorization_code');
+    params.set('redirect_uri', redirectUri);
+  } else {
+    params.set('refresh_token', refreshToken);
+    params.set('grant_type', 'refresh_token');
+  }
+
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: params.toString(),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new StorageProviderError(
+      'GOOGLE_DRIVE_OAUTH_ERROR',
+      String(data?.error_description || data?.error || 'Google OAuth token request failed.')
+    );
+  }
+  return data;
+}
+
+async function refreshGoogleDriveAccessToken(config) {
+  if (!config.googleDrive.refreshToken) {
+    throw new StorageProviderError(
+      'GOOGLE_DRIVE_NOT_CONNECTED',
+      'Google Drive is not connected. Complete OAuth connection first.'
+    );
+  }
+  const tokenData = await fetchGoogleOauthToken({
+    clientId: config.googleDrive.clientId,
+    clientSecret: config.googleDrive.clientSecret,
+    refreshToken: config.googleDrive.refreshToken,
+  });
+
+  const accessToken = trimOrEmpty(tokenData.access_token);
+  if (!accessToken) {
+    throw new StorageProviderError(
+      'GOOGLE_DRIVE_OAUTH_ERROR',
+      'Google OAuth did not return an access token.'
+    );
+  }
+
+  const expiresIn = Number(tokenData.expires_in || 0);
+  const expiryDate = expiresIn > 0 ? new Date(Date.now() + expiresIn * 1000).toISOString() : '';
+  const models = getModels();
+  if (models?.AppSetting) {
+    await models.AppSetting.upsert({
+      key: STORAGE_KEYS.googleDriveAccessToken,
+      valueText: accessToken,
+      updatedBy: null,
+    });
+    await models.AppSetting.upsert({
+      key: STORAGE_KEYS.googleDriveTokenType,
+      valueText: trimOrEmpty(tokenData.token_type) || 'Bearer',
+      updatedBy: null,
+    });
+    await models.AppSetting.upsert({
+      key: STORAGE_KEYS.googleDriveExpiryDate,
+      valueText: expiryDate,
+      updatedBy: null,
+    });
+    await models.AppSetting.upsert({
+      key: STORAGE_KEYS.googleDriveScope,
+      valueText: trimOrEmpty(tokenData.scope),
+      updatedBy: null,
+    });
+  }
+
+  return {
+    accessToken,
+    tokenType: trimOrEmpty(tokenData.token_type) || 'Bearer',
+    expiryDate,
+  };
+}
+
+async function getGoogleDriveAuthorizationHeader(config) {
+  const now = Date.now();
+  const expiry = Date.parse(trimOrEmpty(config.googleDrive.expiryDate) || '');
+  if (config.googleDrive.accessToken && Number.isFinite(expiry) && expiry > now + 30 * 1000) {
+    return `${config.googleDrive.tokenType || 'Bearer'} ${config.googleDrive.accessToken}`;
+  }
+  const refreshed = await refreshGoogleDriveAccessToken(config);
+  return `${refreshed.tokenType || 'Bearer'} ${refreshed.accessToken}`;
+}
+
+async function ensureGoogleDrivePublicReadable(fileId, authHeader) {
+  const response = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/permissions?supportsAllDrives=true`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: authHeader,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        role: 'reader',
+        type: 'anyone',
+      }),
+    }
+  );
+  if (!response.ok && response.status !== 409) {
+    const data = await response.json().catch(() => ({}));
+    throw new StorageProviderError(
+      'GOOGLE_DRIVE_PERMISSION_ERROR',
+      String(data?.error?.message || 'Unable to set Google Drive file permission.')
+    );
+  }
+}
+
 async function uploadImageFromDisk(localPath, options = {}) {
   const config = await getStorageConfig();
+  if (config.provider === 'google_drive') {
+    if (!config.isGoogleDriveConfigured) {
+      return null;
+    }
+
+    const authHeader = await getGoogleDriveAuthorizationHeader(config);
+    const bodyBuffer = await fs.promises.readFile(localPath);
+    const fileName = String(options.fileName || `upload-${Date.now()}`).trim();
+    const folder = trimOrEmpty(options.folder || 'uploads');
+    const mimeType = options.contentType || 'application/octet-stream';
+
+    const metadata = {
+      name: fileName,
+    };
+
+    const parentId = trimOrEmpty(config.googleDrive.folderId);
+    if (parentId) {
+      metadata.parents = [parentId];
+    }
+
+    const boundary = `bizassistant-${crypto.randomBytes(16).toString('hex')}`;
+    const multipartStart = [
+      `--${boundary}`,
+      'Content-Type: application/json; charset=UTF-8',
+      '',
+      JSON.stringify({
+        ...metadata,
+        name: folder ? `${folder.replace(/^\/+|\/+$/g, '')}/${fileName}` : fileName,
+      }),
+      `--${boundary}`,
+      `Content-Type: ${mimeType}`,
+      '',
+    ].join('\r\n');
+    const multipartEnd = `\r\n--${boundary}--`;
+
+    const uploadResponse = await fetch(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: authHeader,
+          'Content-Type': `multipart/related; boundary=${boundary}`,
+        },
+        body: Buffer.concat([
+          Buffer.from(multipartStart, 'utf8'),
+          bodyBuffer,
+          Buffer.from(multipartEnd, 'utf8'),
+        ]),
+      }
+    );
+    const uploadData = await uploadResponse.json().catch(() => ({}));
+    if (!uploadResponse.ok) {
+      throw new StorageProviderError(
+        'GOOGLE_DRIVE_UPLOAD_ERROR',
+        String(uploadData?.error?.message || 'Google Drive upload failed.')
+      );
+    }
+
+    const fileId = trimOrEmpty(uploadData.id);
+    if (!fileId) {
+      throw new StorageProviderError(
+        'GOOGLE_DRIVE_UPLOAD_ERROR',
+        'Google Drive upload did not return a file id.'
+      );
+    }
+    await ensureGoogleDrivePublicReadable(fileId, authHeader);
+    await fs.promises.unlink(localPath).catch(() => undefined);
+    return buildGoogleDrivePublicUrl(fileId);
+  }
+
   if (config.provider !== 'do_spaces' || !config.isDoSpacesConfigured) {
     return null;
   }
@@ -375,6 +636,34 @@ function extractObjectKeyFromUrl(fileUrl, doSpacesConfig) {
 
 async function deleteRemoteFileByUrl(fileUrl) {
   const config = await getStorageConfig();
+  if (config.provider === 'google_drive') {
+    if (!config.isGoogleDriveConfigured) {
+      return { deleted: false, skipped: true, reason: 'provider_not_configured' };
+    }
+    const fileId = extractGoogleDriveFileId(fileUrl);
+    if (!fileId) {
+      return { deleted: false, skipped: true, reason: 'url_not_drive_object' };
+    }
+    const authHeader = await getGoogleDriveAuthorizationHeader(config);
+    const response = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: authHeader,
+        },
+      }
+    );
+    if (!response.ok && response.status !== 404) {
+      const data = await response.json().catch(() => ({}));
+      throw new StorageProviderError(
+        'GOOGLE_DRIVE_DELETE_ERROR',
+        String(data?.error?.message || 'Google Drive delete failed.')
+      );
+    }
+    return { deleted: true, skipped: false };
+  }
+
   if (config.provider !== 'do_spaces' || !config.isDoSpacesConfigured) {
     return { deleted: false, skipped: true, reason: 'provider_not_configured' };
   }
