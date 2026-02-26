@@ -420,10 +420,10 @@ async function createOrder(req, res) {
       ? req.body.orderedItems
       : [];
     const authUser = req.auth?.user || null;
+    const authUserId = authUser?.id || null;
     const actorName = getActorDisplayName(authUser);
     const requestedOrganizationId = String(req.body?.organizationId || '').trim() || null;
     const organizationId = getScopedOrganizationId(req, requestedOrganizationId) || getAuthenticatedOrganizationId(req);
-    const authUserId = authUser?.id || null;
 
     payload.organizationId = organizationId;
     payload.userId = authUserId;
@@ -883,6 +883,7 @@ async function updateOrder(req, res) {
     }
 
     const authUser = req.auth?.user || null;
+    const authUserId = authUser?.id || null;
     const actorName = getActorDisplayName(authUser);
     const beforeState = {
       status: order.status,
@@ -936,8 +937,14 @@ async function updateOrder(req, res) {
     try {
       const activityEvents = [];
 
-      if (hasFieldUpdates) {
-        await order.update(payload, { transaction });
+      if (hasFieldUpdates || authUserId) {
+        const updatePayload = hasFieldUpdates ? { ...payload } : {};
+        if (authUserId) {
+          updatePayload.updatedBy = authUserId;
+        }
+        if (Object.keys(updatePayload).length > 0) {
+          await order.update(updatePayload, { transaction });
+        }
       }
 
       if (requestedWithholdingTaxTypeId !== undefined) {
@@ -1301,7 +1308,7 @@ async function updateOrder(req, res) {
         OrderActivity,
         orderId: order.id,
         organizationId: order.organizationId,
-        actorUserId: authUser?.id || order.updatedBy || order.userId || null,
+        actorUserId: authUserId || order.updatedBy || order.userId || null,
         events: activityEvents,
         transaction,
       });
