@@ -484,9 +484,11 @@ async function createExpense(req, res) {
     return res.status(201).json({ ok: true, data: created || expense });
   } catch (err) {
     if (err instanceof StorageProviderError) {
+      const providerMessage = String(err.message || '').trim();
       return res.status(502).json({
         code: err.code || 'STORAGE_UPLOAD_ERROR',
-        message: err.message || 'Unable to upload expense attachment to cloud storage.',
+        message: providerMessage || 'Unable to upload expense attachment to cloud storage.',
+        details: err.details || null,
       });
     }
     console.error('Create expense error:', err);
