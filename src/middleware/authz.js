@@ -10,6 +10,19 @@ function extractBearerToken(req) {
   return token.trim();
 }
 
+function isPublicApiPath(req) {
+  const method = String(req.method || '').toUpperCase();
+  const path = String(req.path || '').trim();
+  if (
+    method === 'GET' &&
+    (path === '/settings/storage/google-drive/callback'
+      || path === '/api/v1/settings/storage/google-drive/callback')
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function hasPrivilegedRole(roleCodes) {
   const normalized = roleCodes.map((code) => String(code || '').toLowerCase());
   return normalized.includes('superuser') || normalized.includes('administrator');
@@ -70,6 +83,10 @@ async function userHasActiveOrganizationMembership(models, userId, organizationI
 
 async function authenticateRequest(req, res, next) {
   try {
+    if (isPublicApiPath(req)) {
+      return next();
+    }
+
     const models = getModels();
     if (!models || !models.Token || !models.User || !models.Role || !models.Permission || !models.License) {
       return res.status(503).json({
