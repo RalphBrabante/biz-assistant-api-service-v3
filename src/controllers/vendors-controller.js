@@ -3,6 +3,8 @@ const { parse } = require('csv-parse/sync');
 const { getModels } = require('../sequelize');
 const { isPrivilegedRequest } = require('../services/request-scope');
 
+const ALLOWED_VENDOR_CATEGORIES = new Set(['goods', 'operations', 'others']);
+
 function resolveOrganizationId(req, fallback = null) {
   const authOrgId = req.auth?.user?.organizationId || null;
   if (isPrivilegedRequest(req)) {
@@ -17,6 +19,7 @@ function pickVendorPayload(body = {}) {
     name: body.name,
     legalName: body.legalName,
     taxId: body.taxId,
+    category: body.category,
     contactPerson: body.contactPerson,
     contactEmail: body.contactEmail,
     phone: body.phone,
@@ -34,6 +37,14 @@ function pickVendorPayload(body = {}) {
     createdBy: body.createdBy,
     updatedBy: body.updatedBy,
   };
+}
+
+function normalizeVendorCategory(rawValue) {
+  const value = String(rawValue || '').trim().toLowerCase();
+  if (!value) {
+    return 'others';
+  }
+  return value;
 }
 
 function cleanUndefined(payload) {
@@ -95,6 +106,7 @@ async function importVendors(req, res, next) {
       const payload = cleanUndefined({
         organizationId,
         name,
+        category: normalizeVendorCategory(row.category),
         legalName: String(row.legalName || '').trim() || undefined,
         taxId: String(row.taxId || '').trim() || undefined,
         contactPerson: String(row.contactPerson || '').trim() || undefined,
@@ -114,6 +126,11 @@ async function importVendors(req, res, next) {
         createdBy: req.auth?.user?.id || null,
         updatedBy: req.auth?.user?.id || null,
       });
+      if (!ALLOWED_VENDOR_CATEGORIES.has(payload.category)) {
+        skipped += 1;
+        errors.push(`Row ${rowNum}: category must be one of goods, operations, others.`);
+        continue;
+      }
 
       try {
         // eslint-disable-next-line no-await-in-loop
@@ -164,6 +181,7 @@ async function exportVendors(req, res, next) {
     if (q) {
       where[Op.or] = [
         { name: { [Op.like]: `%${q}%` } },
+        { category: { [Op.like]: `%${q}%` } },
         { legalName: { [Op.like]: `%${q}%` } },
         { taxId: { [Op.like]: `%${q}%` } },
         { contactPerson: { [Op.like]: `%${q}%` } },
@@ -186,6 +204,7 @@ async function exportVendors(req, res, next) {
       'name',
       'legalName',
       'taxId',
+      'category',
       'contactPerson',
       'contactEmail',
       'phone',
@@ -213,6 +232,7 @@ async function exportVendors(req, res, next) {
           csvValue(json.name),
           csvValue(json.legalName),
           csvValue(json.taxId),
+          csvValue(json.category),
           csvValue(json.contactPerson),
           csvValue(json.contactEmail),
           csvValue(json.phone),
@@ -271,6 +291,7 @@ async function listVendors(req, res, next) {
     if (q) {
       where[Op.or] = [
         { name: { [Op.like]: `%${q}%` } },
+        { category: { [Op.like]: `%${q}%` } },
         { legalName: { [Op.like]: `%${q}%` } },
         { taxId: { [Op.like]: `%${q}%` } },
         { contactPerson: { [Op.like]: `%${q}%` } },
@@ -326,11 +347,18 @@ async function createVendor(req, res, next) {
 
     const payload = cleanUndefined(pickVendorPayload(req.body));
     payload.organizationId = organizationId;
+    payload.category = normalizeVendorCategory(payload.category);
     payload.createdBy = req.auth?.user?.id || payload.createdBy || null;
     payload.updatedBy = req.auth?.user?.id || payload.updatedBy || null;
 
     if (!payload.name) {
       return res.status(400).json({ code: 'BAD_REQUEST', message: 'name is required.' });
+    }
+    if (!ALLOWED_VENDOR_CATEGORIES.has(payload.category)) {
+      return res.status(400).json({
+        code: 'BAD_REQUEST',
+        message: 'category must be one of: goods, operations, others.',
+      });
     }
 
     const { Vendor } = models;
@@ -416,6 +444,15 @@ async function updateVendor(req, res, next) {
 
     const payload = cleanUndefined(pickVendorPayload(req.body));
     delete payload.organizationId;
+    if (payload.category !== undefined) {
+      payload.category = normalizeVendorCategory(payload.category);
+      if (!ALLOWED_VENDOR_CATEGORIES.has(payload.category)) {
+        return res.status(400).json({
+          code: 'BAD_REQUEST',
+          message: 'category must be one of: goods, operations, others.',
+        });
+      }
+    }
     payload.updatedBy = req.auth?.user?.id || payload.updatedBy || vendor.updatedBy || null;
 
     await vendor.update(payload);

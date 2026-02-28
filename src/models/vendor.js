@@ -26,6 +26,11 @@ function initVendorModel(sequelize) {
         type: DataTypes.STRING(64),
         allowNull: true,
       },
+      category: {
+        type: DataTypes.ENUM('goods', 'operations', 'others'),
+        allowNull: false,
+        defaultValue: 'others',
+      },
       contactPerson: {
         type: DataTypes.STRING(150),
         allowNull: true,
@@ -106,6 +111,7 @@ function initVendorModel(sequelize) {
         { fields: ['name'] },
         { fields: ['contact_email'] },
         { fields: ['status'] },
+        { fields: ['category'] },
         { fields: ['created_by'] },
         { fields: ['updated_by'] },
       ],
