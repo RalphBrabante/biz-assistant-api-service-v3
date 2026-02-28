@@ -100,8 +100,6 @@ function runMiddleware(
 function dispatchToRouter(config: RouteConfig, req: Request, res: Response, next: NextFunction): Promise<void> {
   return new Promise((resolve) => {
     const originalUrl = req.url;
-    const originalBaseUrl = (req as any).baseUrl;
-    const originalPath = req.path;
 
     try {
       const target = req.originalUrl || req.url || '';
@@ -113,8 +111,6 @@ function dispatchToRouter(config: RouteConfig, req: Request, res: Response, next
 
       config.router(req, res, (err?: any) => {
         req.url = originalUrl;
-        (req as any).baseUrl = originalBaseUrl;
-        (req as any).path = originalPath;
 
         if (err) {
           errorHandler(err, req, res, next);
@@ -128,8 +124,6 @@ function dispatchToRouter(config: RouteConfig, req: Request, res: Response, next
       });
     } catch (err) {
       req.url = originalUrl;
-      (req as any).baseUrl = originalBaseUrl;
-      (req as any).path = originalPath;
       errorHandler(err, req, res, next);
       resolve();
     }
