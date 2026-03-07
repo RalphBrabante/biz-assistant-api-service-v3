@@ -41,6 +41,10 @@ function buildGoogleDriveRedirectUri(overrideUri = '') {
 function buildStoragePayload(config) {
   return {
     provider: config.provider,
+    uploadTargets: {
+      expenseAttachment: config.uploadTargets?.expenseAttachment || config.provider,
+      profileImage: config.uploadTargets?.profileImage || config.provider,
+    },
     doSpaces: {
       endpoint: config.doSpaces.endpoint,
       region: config.doSpaces.region,
@@ -235,6 +239,24 @@ async function updateStorageSetting(req, res) {
       });
     }
 
+    const googleDriveBody = req.body?.googleDrive || {};
+    const uploadTargetsBody = req.body?.uploadTargets || {};
+    const expenseAttachmentProvider = String(
+      uploadTargetsBody.expenseAttachment || provider
+    ).trim().toLowerCase();
+    const profileImageProvider = String(
+      uploadTargetsBody.profileImage || provider
+    ).trim().toLowerCase();
+    if (![provider, expenseAttachmentProvider, profileImageProvider].every((candidate) =>
+      ['local', 'do_spaces', 'google_drive'].includes(candidate)
+    )) {
+      return res.status(400).json({
+        code: 'BAD_REQUEST',
+        message: 'provider/uploadTargets must be local, do_spaces, or google_drive.',
+      });
+    }
+    const requiresDoSpaces = [provider, expenseAttachmentProvider, profileImageProvider].includes('do_spaces');
+    const requiresGoogleDrive = [provider, expenseAttachmentProvider, profileImageProvider].includes('google_drive');
     const doSpacesBody = req.body?.doSpaces || {};
     const endpoint = String(doSpacesBody.endpoint || '').trim();
     const region = String(doSpacesBody.region || '').trim();
@@ -243,17 +265,12 @@ async function updateStorageSetting(req, res) {
     const secretKeyInput = String(doSpacesBody.secretKey || '').trim();
     const cdnBaseUrl = String(doSpacesBody.cdnBaseUrl || '').trim();
     const directory = String(doSpacesBody.directory || '').trim();
-
-    if (provider === 'do_spaces') {
-      if (!endpoint || !region || !bucket || !accessKey) {
-        return res.status(400).json({
-          code: 'BAD_REQUEST',
-          message: 'DO Spaces endpoint, region, bucket, and accessKey are required.',
-        });
-      }
+    if (requiresDoSpaces && (!endpoint || !region || !bucket || !accessKey)) {
+      return res.status(400).json({
+        code: 'BAD_REQUEST',
+        message: 'DO Spaces endpoint, region, bucket, and accessKey are required.',
+      });
     }
-
-    const googleDriveBody = req.body?.googleDrive || {};
     const googleClientId = String(googleDriveBody.clientId || '').trim();
     const googleClientSecretInput = String(googleDriveBody.clientSecret || '').trim();
     const googleFolderId = String(googleDriveBody.folderId || '').trim();
@@ -267,7 +284,7 @@ async function updateStorageSetting(req, res) {
       attributes: ['valueText'],
     });
     const finalSecret = secretKeyInput || String(existingSecret?.valueText || '').trim();
-    if (provider === 'do_spaces' && !finalSecret) {
+    if (requiresDoSpaces && !finalSecret) {
       return res.status(400).json({
         code: 'BAD_REQUEST',
         message: 'DO Spaces secretKey is required.',
@@ -280,7 +297,7 @@ async function updateStorageSetting(req, res) {
     });
     const finalGoogleClientSecret =
       googleClientSecretInput || String(existingGoogleSecret?.valueText || '').trim();
-    if (provider === 'google_drive' && (!googleClientId || !finalGoogleClientSecret)) {
+    if (requiresGoogleDrive && (!googleClientId || !finalGoogleClientSecret)) {
       return res.status(400).json({
         code: 'BAD_REQUEST',
         message: 'Google Drive clientId and clientSecret are required.',
@@ -292,6 +309,20 @@ async function updateStorageSetting(req, res) {
       STORAGE_KEYS.provider,
       provider,
       'Global file storage provider: local, do_spaces, or google_drive',
+      updatedBy
+    );
+    await upsertTextSetting(
+      AppSetting,
+      STORAGE_KEYS.expenseAttachmentProvider,
+      expenseAttachmentProvider,
+      'Storage provider for expense attachment uploads',
+      updatedBy
+    );
+    await upsertTextSetting(
+      AppSetting,
+      STORAGE_KEYS.profileImageProvider,
+      profileImageProvider,
+      'Storage provider for profile image uploads',
       updatedBy
     );
     await upsertTextSetting(

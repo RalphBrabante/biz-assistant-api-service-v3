@@ -332,6 +332,7 @@ async function resolveUploadedExpenseFile(req) {
   if (localPath) {
     await compressImageAtPath(localPath, 2 * 1024 * 1024);
     const uploadedUrl = await uploadImageFromDisk(localPath, {
+      targetKey: 'expense_attachment',
       folder: 'expenses',
       fileName: req.file.filename,
       contentType: req.file.mimetype || undefined,
@@ -349,7 +350,7 @@ async function resolveUploadedExpenseFile(req) {
   };
 }
 
-async function createExpense(req, res) {
+async function createExpense(req, res, next) {
   try {
     const models = getExpenseModels();
     if (!models) {
@@ -491,8 +492,7 @@ async function createExpense(req, res) {
         details: err.details || null,
       });
     }
-    console.error('Create expense error:', err);
-    return res.status(500).json({ ok: false, message: 'Unable to create expense.' });
+    return next(err);
   }
 }
 

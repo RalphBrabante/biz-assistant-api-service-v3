@@ -27,6 +27,7 @@ async function resolveUploadedProfileImage(req) {
   if (localPath) {
     await compressImageAtPath(localPath, 2 * 1024 * 1024);
     const uploadedUrl = await uploadImageFromDisk(localPath, {
+      targetKey: 'profile_image',
       folder: 'profiles',
       fileName: req.file.filename,
       contentType: req.file.mimetype || undefined,

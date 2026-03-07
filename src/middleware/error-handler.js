@@ -61,6 +61,23 @@ function formatSequelizeError(err) {
   }
 
   if (err instanceof DatabaseError) {
+    const sqlMessage = String(err?.parent?.sqlMessage || err?.message || '').trim();
+    if (/unknown column/i.test(sqlMessage)) {
+      return {
+        status: 500,
+        code: 'DATABASE_SCHEMA_OUTDATED',
+        message: 'Database schema is outdated. Run the latest migrations and try again.',
+      };
+    }
+
+    if (/data truncated for column .*category/i.test(sqlMessage)) {
+      return {
+        status: 400,
+        code: 'BAD_REQUEST',
+        message: 'category must be one of: goods, operations, others.',
+      };
+    }
+
     return {
       status: 500,
       code: 'DATABASE_ERROR',

@@ -27,6 +27,8 @@ function logStorageDev(level, message, details = undefined) {
 
 const STORAGE_KEYS = {
   provider: 'storage_provider',
+  expenseAttachmentProvider: 'storage_provider_expense_attachment',
+  profileImageProvider: 'storage_provider_profile_image',
   endpoint: 'do_spaces_endpoint',
   region: 'do_spaces_region',
   bucket: 'do_spaces_bucket',
@@ -50,6 +52,14 @@ const STORAGE_KEYS = {
 function normalizeProvider(value) {
   const provider = String(value || 'local').trim().toLowerCase();
   return ['do_spaces', 'google_drive'].includes(provider) ? provider : 'local';
+}
+
+function normalizeTargetProvider(value, fallback = 'local') {
+  const provider = String(value || '').trim().toLowerCase();
+  if (['local', 'do_spaces', 'google_drive'].includes(provider)) {
+    return provider;
+  }
+  return normalizeProvider(fallback);
 }
 
 function trimOrEmpty(value) {
@@ -87,6 +97,16 @@ async function getRawStorageSettings() {
 async function getStorageConfig() {
   const settings = await getRawStorageSettings();
   const provider = normalizeProvider(settings[STORAGE_KEYS.provider]);
+  const uploadTargets = {
+    expenseAttachment: normalizeTargetProvider(
+      settings[STORAGE_KEYS.expenseAttachmentProvider],
+      provider
+    ),
+    profileImage: normalizeTargetProvider(
+      settings[STORAGE_KEYS.profileImageProvider],
+      provider
+    ),
+  };
 
   const doSpaces = {
     endpoint: trimOrEmpty(settings[STORAGE_KEYS.endpoint]),
@@ -135,11 +155,23 @@ async function getStorageConfig() {
 
   return {
     provider,
+    uploadTargets,
     doSpaces,
     isDoSpacesConfigured,
     googleDrive,
     isGoogleDriveConfigured,
   };
+}
+
+function resolveUploadProvider(config, targetKey = '') {
+  const key = String(targetKey || '').trim();
+  if (key === 'expense_attachment') {
+    return normalizeTargetProvider(config.uploadTargets?.expenseAttachment, config.provider);
+  }
+  if (key === 'profile_image') {
+    return normalizeTargetProvider(config.uploadTargets?.profileImage, config.provider);
+  }
+  return normalizeProvider(config.provider);
 }
 
 function normalizeEndpoint(endpoint) {
@@ -407,9 +439,13 @@ async function ensureGoogleDrivePublicReadable(fileId, authHeader) {
 
 async function uploadImageFromDisk(localPath, options = {}) {
   const config = await getStorageConfig();
-  if (config.provider === 'google_drive') {
+  const selectedProvider = resolveUploadProvider(config, options.targetKey);
+  if (selectedProvider === 'google_drive') {
     if (!config.isGoogleDriveConfigured) {
-      return null;
+      throw new StorageProviderError(
+        'GOOGLE_DRIVE_NOT_CONNECTED',
+        'Google Drive is selected for this upload field but is not fully connected.'
+      );
     }
 
     const authHeader = await getGoogleDriveAuthorizationHeader(config);
@@ -489,8 +525,15 @@ async function uploadImageFromDisk(localPath, options = {}) {
     return buildGoogleDrivePublicUrl(fileId);
   }
 
-  if (config.provider !== 'do_spaces' || !config.isDoSpacesConfigured) {
+  if (selectedProvider === 'local') {
     return null;
+  }
+
+  if (selectedProvider !== 'do_spaces' || !config.isDoSpacesConfigured) {
+    throw new StorageProviderError(
+      'STORAGE_PROVIDER_NOT_CONFIGURED',
+      'DigitalOcean Spaces is selected for this upload field but is not fully configured.'
+    );
   }
 
   const endpoint = normalizeDoSpacesEndpoint(config.doSpaces.endpoint, config.doSpaces.bucket);
@@ -650,13 +693,10 @@ function extractObjectKeyFromUrl(fileUrl, doSpacesConfig) {
 
 async function deleteRemoteFileByUrl(fileUrl) {
   const config = await getStorageConfig();
-  if (config.provider === 'google_drive') {
+  const fileId = extractGoogleDriveFileId(fileUrl);
+  if (fileId) {
     if (!config.isGoogleDriveConfigured) {
       return { deleted: false, skipped: true, reason: 'provider_not_configured' };
-    }
-    const fileId = extractGoogleDriveFileId(fileUrl);
-    if (!fileId) {
-      return { deleted: false, skipped: true, reason: 'url_not_drive_object' };
     }
     const authHeader = await getGoogleDriveAuthorizationHeader(config);
     const response = await fetch(
@@ -678,7 +718,7 @@ async function deleteRemoteFileByUrl(fileUrl) {
     return { deleted: true, skipped: false };
   }
 
-  if (config.provider !== 'do_spaces' || !config.isDoSpacesConfigured) {
+  if (!config.isDoSpacesConfigured) {
     return { deleted: false, skipped: true, reason: 'provider_not_configured' };
   }
 
