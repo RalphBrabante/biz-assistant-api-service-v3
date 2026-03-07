@@ -489,7 +489,9 @@ async function createExpense(req, res, next) {
       return res.status(502).json({
         code: err.code || 'STORAGE_UPLOAD_ERROR',
         message: providerMessage || 'Unable to upload expense attachment to cloud storage.',
-        details: err.details || null,
+        data: {
+          details: err.details || null,
+        },
       });
     }
     return next(err);

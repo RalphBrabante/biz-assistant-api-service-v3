@@ -458,52 +458,88 @@ async function uploadImageFromDisk(localPath, options = {}) {
       ? `${folder.replace(/^\/+|\/+$/g, '').replace(/[\\/]/g, '-')}-${safeFileName}`
       : safeFileName;
 
-    const metadata = {
-      name: driveFileName,
+    const boundary = `bizassistant-${crypto.randomBytes(16).toString('hex')}`;
+    const parentId = trimOrEmpty(config.googleDrive.folderId);
+    const uploadMultipart = async (parents = []) => {
+      const metadata = { name: driveFileName };
+      if (Array.isArray(parents) && parents.length > 0) {
+        metadata.parents = parents;
+      }
+      const multipartStart = [
+        `--${boundary}`,
+        'Content-Type: application/json; charset=UTF-8',
+        '',
+        JSON.stringify(metadata),
+        `--${boundary}`,
+        `Content-Type: ${mimeType}`,
+        '',
+      ].join('\r\n');
+      const multipartEnd = `\r\n--${boundary}--`;
+      const response = await fetch(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: authHeader,
+            'Content-Type': `multipart/related; boundary=${boundary}`,
+          },
+          body: Buffer.concat([
+            Buffer.from(multipartStart, 'utf8'),
+            bodyBuffer,
+            Buffer.from(multipartEnd, 'utf8'),
+          ]),
+        }
+      );
+      const data = await response.json().catch(() => ({}));
+      return { response, data };
     };
 
-    const parentId = trimOrEmpty(config.googleDrive.folderId);
-    if (parentId) {
-      metadata.parents = [parentId];
-    }
-
-    const boundary = `bizassistant-${crypto.randomBytes(16).toString('hex')}`;
-    const multipartStart = [
-      `--${boundary}`,
-      'Content-Type: application/json; charset=UTF-8',
-      '',
-      JSON.stringify({
-        ...metadata,
-        name: driveFileName,
-      }),
-      `--${boundary}`,
-      `Content-Type: ${mimeType}`,
-      '',
-    ].join('\r\n');
-    const multipartEnd = `\r\n--${boundary}--`;
-
-    const uploadResponse = await fetch(
-      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true',
-      {
-        method: 'POST',
-        headers: {
-          Authorization: authHeader,
-          'Content-Type': `multipart/related; boundary=${boundary}`,
-        },
-        body: Buffer.concat([
-          Buffer.from(multipartStart, 'utf8'),
-          bodyBuffer,
-          Buffer.from(multipartEnd, 'utf8'),
-        ]),
-      }
-    );
-    const uploadData = await uploadResponse.json().catch(() => ({}));
-    if (!uploadResponse.ok) {
+    let uploadResult;
+    try {
+      uploadResult = await uploadMultipart(parentId ? [parentId] : []);
+    } catch (err) {
       throw new StorageProviderError(
         'GOOGLE_DRIVE_UPLOAD_ERROR',
-        String(uploadData?.error?.message || 'Google Drive upload failed.')
+        'Unable to reach Google Drive API. Check network/firewall and Google connectivity.',
+        {
+          provider: 'google_drive',
+          originalErrorName: String(err?.name || ''),
+          originalErrorMessage: String(err?.message || ''),
+        }
       );
     }
+
+    if (!uploadResult.response.ok) {
+      const originalMessage = String(
+        uploadResult.data?.error?.message || 'Google Drive upload failed.'
+      );
+      const shouldRetryWithoutParent = Boolean(parentId)
+        && /file not found|shared drive|team drive|insufficient permissions/i.test(originalMessage);
+      if (shouldRetryWithoutParent) {
+        try {
+          uploadResult = await uploadMultipart([]);
+        } catch (err) {
+          throw new StorageProviderError('GOOGLE_DRIVE_UPLOAD_ERROR', originalMessage, {
+            provider: 'google_drive',
+            folderId: parentId,
+            originalErrorName: String(err?.name || ''),
+            originalErrorMessage: String(err?.message || ''),
+          });
+        }
+      }
+      if (!uploadResult.response.ok) {
+        throw new StorageProviderError(
+          'GOOGLE_DRIVE_UPLOAD_ERROR',
+          String(uploadResult.data?.error?.message || originalMessage),
+          {
+            provider: 'google_drive',
+            folderId: parentId || null,
+            httpStatusCode: Number(uploadResult.response.status || 0) || null,
+          }
+        );
+      }
+    }
+    const uploadData = uploadResult.data || {};
 
     const fileId = trimOrEmpty(uploadData.id);
     if (!fileId) {
