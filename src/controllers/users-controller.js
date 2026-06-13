@@ -54,8 +54,6 @@ function pickUserPayload(body = {}) {
     firstName: body.firstName,
     lastName: body.lastName,
     email: body.email,
-    profileImageCdnUrl: body.profileImageCdnUrl,
-    profileImageUrl: body.profileImageUrl,
     password: body.password,
     phone: body.phone,
     addressLine1: body.addressLine1,
@@ -65,11 +63,6 @@ function pickUserPayload(body = {}) {
     postalCode: body.postalCode,
     country: body.country,
     role: body.role,
-    status: body.status,
-    isEmailVerified: body.isEmailVerified,
-    emailVerifiedAt: body.emailVerifiedAt,
-    isActive: body.isActive,
-    lastLoginAt: body.lastLoginAt,
   };
 }
 
@@ -669,6 +662,11 @@ async function updateUser(req, res) {
     }
     if (payload.organizationId && !isRequesterSuperuser(req)) {
       delete payload.organizationId;
+    }
+    // isActive and status are admin-only; only superusers may set them
+    if (isRequesterSuperuser(req)) {
+      if (req.body.isActive !== undefined) payload.isActive = parseBoolean(req.body.isActive);
+      if (req.body.status !== undefined) payload.status = String(req.body.status || '').trim() || undefined;
     }
     if (payload.email) {
       payload.email = String(payload.email).toLowerCase().trim();

@@ -207,17 +207,45 @@ async function login(req, res) {
       return res.status(401).json(genericError);
     }
 
+    // Check for an active lockout before attempting password comparison
+    const activeLock = await models.InvalidLoginAttempt.findOne({
+      where: { userId: user.id, lockedUntil: { [Op.gt]: new Date() } },
+      order: [['createdAt', 'DESC']],
+    });
+    if (activeLock) {
+      return res.status(429).json({
+        ok: false,
+        message: 'Account temporarily locked due to too many failed login attempts. Please try again later.',
+      });
+    }
+
     const passwordMatches = await comparePassword(password, user.password);
     if (!passwordMatches) {
+      const LOCKOUT_THRESHOLD = 5;
+      const LOCKOUT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+      const windowStart = new Date(Date.now() - LOCKOUT_WINDOW_MS);
+      const recentCount = await models.InvalidLoginAttempt.count({
+        where: {
+          userId: user.id,
+          createdAt: { [Op.gte]: windowStart },
+          lockedUntil: null,
+        },
+      });
+      const shouldLock = recentCount + 1 >= LOCKOUT_THRESHOLD;
       await models.InvalidLoginAttempt.create({
         userId: user.id,
         attemptedEmail: normalizedEmail,
         ipAddress: req.ip || null,
         userAgent: req.get('user-agent') || null,
         failureReason: 'invalid_password',
+        attemptCountWindow: recentCount + 1,
+        lockedUntil: shouldLock ? new Date(Date.now() + LOCKOUT_WINDOW_MS) : null,
       });
       return res.status(401).json(genericError);
     }
+
+    // Successful login — clear any previous failed attempts for this user
+    await models.InvalidLoginAttempt.destroy({ where: { userId: user.id } });
 
     const loginAccess = isUserAllowedToLogin(user);
     if (!loginAccess.ok) {

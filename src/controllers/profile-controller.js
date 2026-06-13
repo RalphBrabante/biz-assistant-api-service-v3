@@ -1,4 +1,5 @@
 const path = require('path');
+const bcrypt = require('bcryptjs');
 const { getModels } = require('../sequelize');
 const {
   compressImageAtPath,
@@ -154,6 +155,30 @@ async function updateMyProfile(req, res) {
         ].filter(Boolean)
       )
     );
+    // If the request includes a password change, verify the current password first
+    const newPassword = String(req.body?.password || '').trim();
+    if (newPassword) {
+      const currentPassword = String(req.body?.currentPassword || '').trim();
+      if (!currentPassword) {
+        return res.status(400).json({
+          code: 'VALIDATION_ERROR',
+          message: 'Current password is required to set a new password.',
+        });
+      }
+      let passwordMatches = false;
+      try {
+        passwordMatches = await bcrypt.compare(currentPassword, user.password);
+      } catch (_err) {
+        passwordMatches = currentPassword === user.password;
+      }
+      if (!passwordMatches) {
+        return res.status(400).json({
+          code: 'VALIDATION_ERROR',
+          message: 'Current password is incorrect.',
+        });
+      }
+    }
+
     const payload = await buildProfilePayload(req);
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({

@@ -280,7 +280,9 @@ async function connectAmqp() {
 }
 
 app.use('/api/v1/auth', authRoutes);
-app.use('/api/v1/dev', devRoutes);
+if (process.env.NODE_ENV !== 'production' && process.env.APP_ENV !== 'staging') {
+  app.use('/api/v1/dev', devRoutes);
+}
 app.use('/api/v1', authenticateRequest);
 app.use('/api/v1', readCacheMiddleware);
 app.use('/api/v1', invalidateCacheOnWriteMiddleware);
