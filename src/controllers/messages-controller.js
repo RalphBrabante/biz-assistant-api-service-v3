@@ -167,9 +167,43 @@ async function markMessageRead(req, res) {
   }
 }
 
+async function markAllMessagesRead(req, res) {
+  try {
+    const models = getMessageModels();
+    if (!models) {
+      return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
+    }
+
+    const { Message } = models;
+    const where = { isRead: false };
+
+    if (req.query.organizationId) {
+      where.organizationId = req.query.organizationId;
+    }
+    if (!applyOrganizationWhereScope(where, req)) {
+      return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId is required for this user.' });
+    }
+
+    const [updatedCount] = await Message.update(
+      { isRead: true, readAt: new Date() },
+      { where }
+    );
+
+    return res.status(200).json({
+      code: 'SUCCESS',
+      message: 'All messages marked as read.',
+      data: { updatedCount },
+    });
+  } catch (err) {
+    console.error('Mark all messages read error:', err);
+    return res.status(500).json({ code: 'INTERNAL_SERVER_ERROR', message: 'Unable to mark all messages as read.' });
+  }
+}
+
 module.exports = {
   getUnreadMessageCount,
   listMessages,
   markMessageRead,
+  markAllMessagesRead,
 };
 
