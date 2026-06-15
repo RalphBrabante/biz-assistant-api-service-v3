@@ -19,6 +19,7 @@ import { TaxTypesModule } from './modules/tax-types/tax-types.module';
 import { WithholdingTaxTypesModule } from './modules/withholding-tax-types/withholding-tax-types.module';
 import { ProfileModule } from './modules/profile/profile.module';
 import { MessagesModule } from './modules/messages/messages.module';
+import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { DevModule } from './modules/dev/dev.module';
 
 @Module({
@@ -43,6 +44,7 @@ import { DevModule } from './modules/dev/dev.module';
     WithholdingTaxTypesModule,
     ProfileModule,
     MessagesModule,
+    DashboardModule,
     DevModule,
   ],
 })

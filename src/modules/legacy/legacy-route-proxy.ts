@@ -19,6 +19,7 @@ const taxTypesRoutes = require('../../routes/tax-types-routes');
 const withholdingTaxTypesRoutes = require('../../routes/withholding-tax-types-routes');
 const profileRoutes = require('../../routes/profile-routes');
 const messagesRoutes = require('../../routes/messages-routes');
+const dashboardRoutes = require('../../routes/dashboard-routes');
 const devRoutes = require('../../routes/dev-routes');
 
 const { authenticateRequest } = require('../../middleware/authz');
@@ -45,7 +46,8 @@ type RouteKey =
   | 'tax-types'
   | 'withholding-tax-types'
   | 'profile'
-  | 'messages';
+  | 'messages'
+  | 'dashboard';
 
 type RouteConfig = {
   prefix: string;
@@ -78,6 +80,7 @@ const ROUTE_CONFIG: Record<RouteKey, RouteConfig> = {
   },
   profile: { prefix: '/api/v1/profile', router: profileRoutes, protected: true },
   messages: { prefix: '/api/v1/messages', router: messagesRoutes, protected: true },
+  dashboard: { prefix: '/api/v1/dashboard', router: dashboardRoutes, protected: true },
 };
 
 function runMiddleware(
