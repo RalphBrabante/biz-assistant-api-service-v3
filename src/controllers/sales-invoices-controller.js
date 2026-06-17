@@ -398,7 +398,7 @@ async function listSalesInvoices(req, res) {
     if (!models || !models.SalesInvoice || !models.Organization) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { SalesInvoice, Organization } = models;
+    const { SalesInvoice, Organization, Order, Customer } = models;
 
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 10000);
@@ -444,6 +444,18 @@ async function listSalesInvoices(req, res) {
           attributes: ['id', 'name', 'legalName'],
           required: false,
         },
+        ...(Order && Customer ? [{
+          model: Order,
+          as: 'order',
+          attributes: ['id', 'customerId'],
+          required: false,
+          include: [{
+            model: Customer,
+            as: 'customer',
+            attributes: ['id', 'name', 'contactPerson', 'email', 'phone', 'addressLine1', 'addressLine2', 'city', 'state', 'postalCode', 'country'],
+            required: false,
+          }],
+        }] : []),
       ],
       limit,
       offset,

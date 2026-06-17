@@ -468,7 +468,7 @@ async function createExpense(req, res, next) {
       include: [
         {
           association: 'vendor',
-          attributes: ['id', 'name', 'taxId'],
+          attributes: ['id', 'name', 'taxId', 'contactPerson', 'phone', 'contactEmail', 'addressLine1', 'addressLine2', 'barangay', 'city', 'province', 'postalCode', 'country'],
           required: false,
         },
         {
@@ -554,7 +554,7 @@ async function listExpenses(req, res) {
         },
         {
           association: 'vendor',
-          attributes: ['id', 'name', 'taxId'],
+          attributes: ['id', 'name', 'taxId', 'contactPerson', 'phone', 'contactEmail', 'addressLine1', 'addressLine2', 'barangay', 'city', 'province', 'postalCode', 'country'],
           required: false,
         },
         {
@@ -633,7 +633,7 @@ async function exportExpenses(req, res) {
       include: [
         {
           association: 'vendor',
-          attributes: ['id', 'name', 'taxId'],
+          attributes: ['id', 'name', 'taxId', 'contactPerson', 'phone', 'contactEmail', 'addressLine1', 'addressLine2', 'barangay', 'city', 'province', 'postalCode', 'country'],
           required: false,
         },
         {
@@ -755,7 +755,7 @@ async function getExpenseById(req, res) {
       include: [
         {
           association: 'vendor',
-          attributes: ['id', 'name', 'taxId'],
+          attributes: ['id', 'name', 'taxId', 'contactPerson', 'phone', 'contactEmail', 'addressLine1', 'addressLine2', 'barangay', 'city', 'province', 'postalCode', 'country'],
           required: false,
         },
         {
@@ -916,7 +916,7 @@ async function updateExpense(req, res) {
       include: [
         {
           association: 'vendor',
-          attributes: ['id', 'name', 'taxId'],
+          attributes: ['id', 'name', 'taxId', 'contactPerson', 'phone', 'contactEmail', 'addressLine1', 'addressLine2', 'barangay', 'city', 'province', 'postalCode', 'country'],
           required: false,
         },
         {
