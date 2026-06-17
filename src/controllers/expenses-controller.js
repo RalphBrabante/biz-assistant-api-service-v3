@@ -61,6 +61,8 @@ function pickExpensePayload(body = {}) {
     taxAmount: body.taxAmount,
     taxTypeId: body.taxTypeId,
     discountAmount: body.discountAmount,
+    scPwdDiscount: body.scPwdDiscount,
+    serviceCharge: body.serviceCharge,
     totalAmount: body.totalAmount,
     receiptUrl: body.receiptUrl,
     file: body.file,

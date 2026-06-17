@@ -95,6 +95,16 @@ function initExpenseModel(sequelize) {
         allowNull: false,
         defaultValue: 0.0,
       },
+      scPwdDiscount: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: false,
+        defaultValue: 0.0,
+      },
+      serviceCharge: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: false,
+        defaultValue: 0.0,
+      },
       totalAmount: {
         type: DataTypes.DECIMAL(12, 2),
         allowNull: false,

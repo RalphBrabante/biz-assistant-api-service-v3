@@ -36,6 +36,8 @@ function pickSalesInvoicePayload(body = {}) {
     subtotalAmount: body.subtotalAmount,
     taxAmount: body.taxAmount,
     discountAmount: body.discountAmount,
+    scPwdDiscount: body.scPwdDiscount,
+    serviceCharge: body.serviceCharge,
     totalAmount: body.totalAmount,
     paidAt: body.paidAt,
     notes: body.notes,
