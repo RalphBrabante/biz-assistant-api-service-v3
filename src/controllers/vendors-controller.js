@@ -362,6 +362,21 @@ async function createVendor(req, res, next) {
     }
 
     const { Vendor } = models;
+
+    const taxId = String(payload.taxId || '').trim();
+    if (taxId) {
+      const existing = await Vendor.findOne({
+        where: { organizationId, taxId },
+        attributes: ['id', 'name'],
+      });
+      if (existing) {
+        return res.status(409).json({
+          code: 'CONFLICT',
+          message: `A vendor with TIN "${taxId}" already exists (${existing.name}).`,
+        });
+      }
+    }
+
     const vendor = await Vendor.create(payload);
 
     return res.status(201).json({

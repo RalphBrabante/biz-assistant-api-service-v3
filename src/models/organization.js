@@ -50,7 +50,7 @@ function initOrganizationModel(sequelize) {
       currency: {
         type: DataTypes.STRING(3),
         allowNull: false,
-        defaultValue: 'USD',
+        defaultValue: 'PHP',
       },
       taxTypeId: {
         type: DataTypes.UUID,

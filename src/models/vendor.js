@@ -107,6 +107,7 @@ function initVendorModel(sequelize) {
       timestamps: true,
       underscored: true,
       indexes: [
+        { unique: true, fields: ['organization_id', 'tax_id'], name: 'vendors_organization_id_tax_id_unique' },
         { fields: ['organization_id'] },
         { fields: ['name'] },
         { fields: ['contact_email'] },
