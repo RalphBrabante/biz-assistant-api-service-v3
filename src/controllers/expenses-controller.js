@@ -667,6 +667,9 @@ async function listExpenses(req, res) {
         { category: { [Op.like]: `%${req.query.q}%` } },
         { description: { [Op.like]: `%${req.query.q}%` } },
         { vendorTaxId: { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.name$': { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.legal_name$': { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.tax_id$': { [Op.like]: `%${req.query.q}%` } },
       ];
     }
 
@@ -752,6 +755,9 @@ async function exportExpenses(req, res) {
         { category: { [Op.like]: `%${req.query.q}%` } },
         { description: { [Op.like]: `%${req.query.q}%` } },
         { vendorTaxId: { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.name$': { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.legal_name$': { [Op.like]: `%${req.query.q}%` } },
+        { '$vendor.tax_id$': { [Op.like]: `%${req.query.q}%` } },
       ];
     }
 
