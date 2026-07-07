@@ -124,6 +124,10 @@ function resolveImportOrganizationId(req) {
   return req.body?.organizationId || req.query?.organizationId || getAuthenticatedOrganizationId(req);
 }
 
+function getAuthenticatedUserId(req) {
+  return req.auth?.userId || req.auth?.user?.id || null;
+}
+
 function roundCurrency(value) {
   const numeric = Number(value || 0);
   if (!Number.isFinite(numeric)) {
@@ -214,6 +218,39 @@ async function userHasActiveOrganizationMembership(models, userId, organizationI
   });
 
   return Boolean(membership);
+}
+
+async function userCanAccessOrganization(models, req, organizationId) {
+  if (isPrivilegedRequest(req)) {
+    return true;
+  }
+
+  const authOrgId = getAuthenticatedOrganizationId(req);
+  if (authOrgId && authOrgId === organizationId) {
+    return true;
+  }
+
+  return userHasActiveOrganizationMembership(models, getAuthenticatedUserId(req), organizationId);
+}
+
+async function userCanUseVendorForExpenseOrganization(models, req, vendor, expenseOrganizationId) {
+  if (!vendor || !expenseOrganizationId) {
+    return false;
+  }
+
+  if (vendor.organizationId === expenseOrganizationId) {
+    return true;
+  }
+
+  if (isPrivilegedRequest(req)) {
+    return true;
+  }
+
+  const userId = getAuthenticatedUserId(req);
+  return (
+    await userHasActiveOrganizationMembership(models, userId, expenseOrganizationId)
+    && await userHasActiveOrganizationMembership(models, userId, vendor.organizationId)
+  );
 }
 
 async function listTransferTargetOrganizations(req, res) {
@@ -494,11 +531,15 @@ async function createExpense(req, res, next) {
       payload.fileCdnUrl = uploadedFile.fileCdnUrl;
     }
     if (!isPrivilegedRequest(req)) {
-      payload.organizationId = getAuthenticatedOrganizationId(req);
+      const requestedOrganizationId = String(payload.organizationId || '').trim();
+      payload.organizationId = requestedOrganizationId || getAuthenticatedOrganizationId(req);
     }
 
     if (!payload.organizationId) {
       return res.status(400).json({ ok: false, message: 'organizationId is required.' });
+    }
+    if (!await userCanAccessOrganization(models, req, payload.organizationId)) {
+      return res.status(403).json({ ok: false, message: 'You do not have access to this organization.' });
     }
     if (!payload.vendorId) {
       return res.status(400).json({ ok: false, message: 'vendorId is required.' });
@@ -563,10 +604,9 @@ async function createExpense(req, res, next) {
     const vendor = await Vendor.findOne({
       where: {
         id: payload.vendorId,
-        organizationId: payload.organizationId,
       },
     });
-    if (!vendor) {
+    if (!vendor || !await userCanUseVendorForExpenseOrganization(models, req, vendor, payload.organizationId)) {
       return res.status(400).json({
         ok: false,
         message: 'Selected vendor is invalid for this organization.',
@@ -1201,10 +1241,9 @@ async function updateExpense(req, res) {
       const vendor = await Vendor.findOne({
         where: {
           id: payload.vendorId,
-          organizationId,
         },
       });
-      if (!vendor) {
+      if (!vendor || !await userCanUseVendorForExpenseOrganization(models, req, vendor, organizationId)) {
         return res.status(400).json({
           ok: false,
           message: 'Selected vendor is invalid for this organization.',

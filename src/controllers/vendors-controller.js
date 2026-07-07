@@ -13,6 +13,38 @@ function resolveOrganizationId(req, fallback = null) {
   return authOrgId;
 }
 
+function getAuthenticatedUserId(req) {
+  return req.auth?.user?.id || req.auth?.userId || null;
+}
+
+async function getSharedVendorOrganizationIds(req, models, targetOrganizationId) {
+  const userId = getAuthenticatedUserId(req);
+  if (!userId || !models.OrganizationUser) {
+    return [targetOrganizationId].filter(Boolean);
+  }
+
+  const memberships = await models.OrganizationUser.findAll({
+    where: {
+      userId,
+      isActive: true,
+    },
+    attributes: ['organizationId'],
+  });
+  const organizationIds = memberships
+    .map((membership) => membership.organizationId)
+    .filter(Boolean);
+  const authOrgId = req.auth?.user?.organizationId || null;
+  if (authOrgId && !organizationIds.includes(authOrgId)) {
+    organizationIds.push(authOrgId);
+  }
+
+  if (!targetOrganizationId || organizationIds.includes(targetOrganizationId)) {
+    return organizationIds;
+  }
+
+  return isPrivilegedRequest(req) ? [targetOrganizationId] : [];
+}
+
 function pickVendorPayload(body = {}) {
   return {
     organizationId: body.organizationId,
@@ -270,7 +302,11 @@ async function listVendors(req, res, next) {
       return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
     }
 
-    const organizationId = resolveOrganizationId(req);
+    const includeShared = String(req.query.includeShared || '').toLowerCase() === 'true';
+    const requestedOrganizationId = String(req.query.organizationId || '').trim();
+    const organizationId = includeShared && requestedOrganizationId
+      ? requestedOrganizationId
+      : resolveOrganizationId(req);
     if (!organizationId) {
       return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
     }
@@ -279,7 +315,13 @@ async function listVendors(req, res, next) {
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
     const offset = (page - 1) * limit;
 
-    const where = { organizationId };
+    const where = {};
+    if (includeShared) {
+      const sharedOrganizationIds = await getSharedVendorOrganizationIds(req, models, organizationId);
+      where.organizationId = { [Op.in]: sharedOrganizationIds };
+    } else {
+      where.organizationId = organizationId;
+    }
     if (req.query.status) {
       where.status = String(req.query.status).toLowerCase();
     }
