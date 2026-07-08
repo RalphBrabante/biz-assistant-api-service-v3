@@ -11,6 +11,10 @@ const {
   getAuthenticatedOrganizationId,
   applyOrganizationWhereScope,
 } = require('../services/request-scope');
+const {
+  isPercentageTaxType,
+  isVatTaxType,
+} = require('../services/tax-calculation');
 
 function getSalesInvoiceModel() {
   const models = getModels();
@@ -33,6 +37,7 @@ function pickSalesInvoicePayload(body = {}) {
     amount: body.amount,
     taxableAmount: body.taxableAmount,
     withHoldingTaxAmount: body.withHoldingTaxAmount,
+    withholdingTaxTypeId: body.withholdingTaxTypeId,
     subtotalAmount: body.subtotalAmount,
     taxAmount: body.taxAmount,
     discountAmount: body.discountAmount,
@@ -84,35 +89,63 @@ function roundCurrency(value) {
   return Math.round((numeric + Number.EPSILON) * 100) / 100;
 }
 
-function normalizeInvoiceTotals(payload = {}) {
+function normalizeInvoiceTotals(payload = {}, taxType = {}, withholdingTaxType = null) {
   // Normalize invoice math in one place so create/import use the same rules.
-  const subtotalAmount = roundCurrency(
+  const grossAmount = roundCurrency(
     payload.subtotalAmount !== undefined ? payload.subtotalAmount : payload.amount
   );
-  const taxAmount = roundCurrency(payload.taxAmount);
-  const withHoldingTaxAmount = roundCurrency(payload.withHoldingTaxAmount);
-  const taxableAmount = roundCurrency(
-    payload.taxableAmount !== undefined
-      ? payload.taxableAmount
-      : Math.max(subtotalAmount - taxAmount, 0)
-  );
+  const discountAmount = roundCurrency(payload.discountAmount);
+  const scPwdDiscount = roundCurrency(payload.scPwdDiscount);
+  const serviceCharge = roundCurrency(payload.serviceCharge);
+  const requestedWithholding = roundCurrency(payload.withHoldingTaxAmount);
+  const vatRate = isVatTaxType(taxType) ? Number(taxType.percentage || 0) / 100 : 0;
+  const subtotalAmount = vatRate > 0
+    ? roundCurrency(grossAmount / (1 + vatRate))
+    : grossAmount;
+  const taxableAmount = vatRate > 0
+    ? roundCurrency(Math.max(subtotalAmount - discountAmount - scPwdDiscount, 0))
+    : roundCurrency(Math.max(grossAmount - discountAmount - scPwdDiscount + serviceCharge, 0));
+  const taxAmount = vatRate > 0 ? roundCurrency(taxableAmount * vatRate) : 0;
+  const withholdingRate = withholdingTaxType ? Number(withholdingTaxType.percentage || 0) / 100 : 0;
+  const withHoldingTaxAmount = withholdingRate > 0
+    ? roundCurrency(taxableAmount * withholdingRate)
+    : requestedWithholding;
 
-  payload.amount = subtotalAmount;
+  payload.amount = grossAmount;
   payload.subtotalAmount = subtotalAmount;
   payload.taxAmount = taxAmount;
   payload.taxableAmount = taxableAmount;
   payload.withHoldingTaxAmount = withHoldingTaxAmount;
+  payload.discountAmount = discountAmount;
+  payload.scPwdDiscount = scPwdDiscount;
+  payload.serviceCharge = serviceCharge;
 
-  if (payload.totalAmount !== undefined) {
-    payload.totalAmount = roundCurrency(payload.totalAmount);
-  } else {
-    payload.totalAmount = roundCurrency(
-      Math.max(subtotalAmount - withHoldingTaxAmount - roundCurrency(payload.discountAmount), 0)
-    );
+  payload.totalAmount = vatRate > 0
+    ? roundCurrency(Math.max(taxableAmount + taxAmount + serviceCharge - withHoldingTaxAmount, 0))
+    : roundCurrency(Math.max(taxableAmount - withHoldingTaxAmount, 0));
+  if (isPercentageTaxType(taxType)) {
+    payload.taxAmount = 0;
   }
-  if (payload.discountAmount !== undefined) {
-    payload.discountAmount = roundCurrency(payload.discountAmount);
+}
+
+async function resolveInvoiceWithholdingTaxType(models, organizationId, withholdingTaxTypeId) {
+  const requestedId = String(withholdingTaxTypeId || '').trim();
+  if (!requestedId) {
+    return null;
   }
+  if (!models?.WithholdingTaxType) {
+    return null;
+  }
+  return models.WithholdingTaxType.findOne({
+    where: {
+      id: requestedId,
+      organizationId,
+      isActive: true,
+      appliesTo: {
+        [Op.in]: ['invoice', 'both'],
+      },
+    },
+  });
 }
 
 function csvValue(value) {
@@ -157,10 +190,10 @@ function resolveImportOrganizationId(req) {
 async function importSalesInvoices(req, res) {
   try {
     const models = getModels();
-    if (!models || !models.SalesInvoice) {
+    if (!models || !models.SalesInvoice || !models.Organization || !models.WithholdingTaxType) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { SalesInvoice } = models;
+    const { SalesInvoice, Organization, WithholdingTaxType } = models;
     const Order = models.Order || null;
 
     if (!req.file || !req.file.buffer) {
@@ -185,6 +218,21 @@ async function importSalesInvoices(req, res) {
     }
 
     const currency = await getOrganizationCurrency(organizationId);
+    const organization = await Organization.findByPk(organizationId, {
+      include: [
+        {
+          association: 'taxType',
+          attributes: ['id', 'code', 'name', 'percentage', 'isActive'],
+          required: false,
+        },
+      ],
+    });
+    if (!organization || !organization.taxTypeId || !organization.taxType || organization.taxType.isActive === false) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Organization tax type is required and must be active before importing sales invoices.',
+      });
+    }
     let imported = 0;
     let updated = 0;
     let skipped = 0;
@@ -214,6 +262,8 @@ async function importSalesInvoices(req, res) {
       const orderId = cell('orderId', 'order_id', 'order id');
       const invoiceNumber = cell('invoiceNumber', 'invoice_number', 'invoice no', 'invoice_no');
       const issueDate = cell('issueDate', 'issue_date', 'invoiceDate', 'invoice_date');
+      const withholdingTaxTypeId = cell('withholdingTaxTypeId', 'withholding_tax_type_id');
+      const withholdingTaxTypeCode = cell('withholdingTaxTypeCode', 'withholding_tax_type_code', 'ewtCode', 'ewt_code');
 
       if (!invoiceNumber || !issueDate) {
         skipped += 1;
@@ -250,6 +300,7 @@ async function importSalesInvoices(req, res) {
         amount: numberCell('amount'),
         taxableAmount: numberCell('taxableAmount', 'taxable_amount'),
         withHoldingTaxAmount: numberCell('withHoldingTaxAmount', 'with_holding_tax_amount', 'withholding_tax_amount'),
+        withholdingTaxTypeId: withholdingTaxTypeId || undefined,
         subtotalAmount: numberCell('subtotalAmount', 'subtotal_amount'),
         taxAmount: numberCell('taxAmount', 'tax_amount'),
         discountAmount: numberCell('discountAmount', 'discount_amount'),
@@ -259,7 +310,27 @@ async function importSalesInvoices(req, res) {
         createdBy: req.auth?.user?.id || null,
         updatedBy: req.auth?.user?.id || null,
       });
-      normalizeInvoiceTotals(payload);
+      let withholdingTaxType = null;
+      if (withholdingTaxTypeId || withholdingTaxTypeCode) {
+        // eslint-disable-next-line no-await-in-loop
+        withholdingTaxType = await WithholdingTaxType.findOne({
+          where: {
+            organizationId,
+            isActive: true,
+            appliesTo: { [Op.in]: ['invoice', 'both'] },
+            ...(withholdingTaxTypeId
+              ? { id: withholdingTaxTypeId }
+              : { code: withholdingTaxTypeCode.toUpperCase() }),
+          },
+        });
+        if (!withholdingTaxType) {
+          skipped += 1;
+          errors.push(`Row ${rowNum}: withholdingTaxTypeId/withholdingTaxTypeCode is invalid for sales invoices.`);
+          continue;
+        }
+        payload.withholdingTaxTypeId = withholdingTaxType.id;
+      }
+      normalizeInvoiceTotals(payload, organization.taxType, withholdingTaxType);
 
       try {
         if (Order && orderId) {
@@ -348,10 +419,11 @@ async function importSalesInvoices(req, res) {
 
 async function createSalesInvoice(req, res) {
   try {
-    const SalesInvoice = getSalesInvoiceModel();
-    if (!SalesInvoice) {
+    const models = getModels();
+    if (!models || !models.SalesInvoice || !models.Organization) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const { SalesInvoice, Organization } = models;
 
     const payload = cleanUndefined(pickSalesInvoicePayload(req.body));
     if (!isPrivilegedRequest(req)) {
@@ -368,7 +440,33 @@ async function createSalesInvoice(req, res) {
       return res.status(400).json({ ok: false, message: 'issueDate is required.' });
     }
     payload.currency = await getOrganizationCurrency(payload.organizationId);
-    normalizeInvoiceTotals(payload);
+    const organization = await Organization.findByPk(payload.organizationId, {
+      include: [
+        {
+          association: 'taxType',
+          attributes: ['id', 'code', 'name', 'percentage', 'isActive'],
+          required: false,
+        },
+      ],
+    });
+    if (!organization || !organization.taxTypeId || !organization.taxType || organization.taxType.isActive === false) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Organization tax type is required and must be active before creating sales invoices.',
+      });
+    }
+    const withholdingTaxType = await resolveInvoiceWithholdingTaxType(
+      models,
+      payload.organizationId,
+      payload.withholdingTaxTypeId
+    );
+    if (payload.withholdingTaxTypeId && !withholdingTaxType) {
+      return res.status(400).json({
+        ok: false,
+        message: 'withholdingTaxTypeId is invalid for sales invoices.',
+      });
+    }
+    normalizeInvoiceTotals(payload, organization.taxType, withholdingTaxType);
 
     const salesInvoice = await SalesInvoice.create(payload);
     const actorName = getActorDisplayName(req.auth?.user);
@@ -398,7 +496,7 @@ async function listSalesInvoices(req, res) {
     if (!models || !models.SalesInvoice || !models.Organization) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { SalesInvoice, Organization, Order, Customer } = models;
+    const { SalesInvoice, Organization, Order, Customer, WithholdingTaxType } = models;
 
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 10000);
@@ -442,6 +540,13 @@ async function listSalesInvoices(req, res) {
           model: Organization,
           as: 'organization',
           attributes: ['id', 'name', 'legalName'],
+          include: [
+            {
+              association: 'taxType',
+              attributes: ['id', 'code', 'name', 'percentage'],
+              required: false,
+            },
+          ],
           required: false,
         },
         ...(Order && Customer ? [{
@@ -455,6 +560,12 @@ async function listSalesInvoices(req, res) {
             attributes: ['id', 'name', 'contactPerson', 'email', 'phone', 'addressLine1', 'addressLine2', 'city', 'state', 'postalCode', 'country'],
             required: false,
           }],
+        }] : []),
+        ...(WithholdingTaxType ? [{
+          model: WithholdingTaxType,
+          as: 'withholdingTaxType',
+          attributes: ['id', 'code', 'name', 'percentage', 'appliesTo'],
+          required: false,
         }] : []),
       ],
       limit,
@@ -484,10 +595,12 @@ async function listSalesInvoices(req, res) {
 
 async function exportSalesInvoices(req, res) {
   try {
-    const SalesInvoice = getSalesInvoiceModel();
+    const models = getModels();
+    const SalesInvoice = models?.SalesInvoice;
     if (!SalesInvoice) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
+    const WithholdingTaxType = models.WithholdingTaxType || null;
 
     const where = {};
     const { sortBy, sortDirection } = resolveSortOptions(req.query);
@@ -522,6 +635,12 @@ async function exportSalesInvoices(req, res) {
 
     const rows = await SalesInvoice.findAll({
       where,
+      include: WithholdingTaxType ? [{
+        model: WithholdingTaxType,
+        as: 'withholdingTaxType',
+        attributes: ['id', 'code', 'name', 'percentage'],
+        required: false,
+      }] : [],
       order: [
         [sortBy, sortDirection],
         ['createdAt', 'DESC'],
@@ -542,6 +661,9 @@ async function exportSalesInvoices(req, res) {
       'amount',
       'taxableAmount',
       'withHoldingTaxAmount',
+      'withholdingTaxTypeId',
+      'withholdingTaxTypeCode',
+      'withholdingTaxTypeName',
       'subtotalAmount',
       'taxAmount',
       'discountAmount',
@@ -569,6 +691,9 @@ async function exportSalesInvoices(req, res) {
           csvValue(json.amount),
           csvValue(json.taxableAmount),
           csvValue(json.withHoldingTaxAmount),
+          csvValue(json.withholdingTaxTypeId),
+          csvValue(json.withholdingTaxType?.code),
+          csvValue(json.withholdingTaxType?.name),
           csvValue(json.subtotalAmount),
           csvValue(json.taxAmount),
           csvValue(json.discountAmount),
@@ -598,7 +723,7 @@ async function getSalesInvoiceById(req, res) {
     if (!models || !models.SalesInvoice || !models.Order || !models.OrderItemSnapshot || !models.Customer) {
       return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
     }
-    const { SalesInvoice, Order, OrderItemSnapshot, Customer } = models;
+    const { SalesInvoice, Order, OrderItemSnapshot, Customer, WithholdingTaxType } = models;
 
     const where = { id: req.params.id };
     if (!isPrivilegedRequest(req)) {
@@ -626,6 +751,12 @@ async function getSalesInvoiceById(req, res) {
             },
           ],
         },
+        ...(WithholdingTaxType ? [{
+          model: WithholdingTaxType,
+          as: 'withholdingTaxType',
+          attributes: ['id', 'code', 'name', 'percentage', 'appliesTo'],
+          required: false,
+        }] : []),
       ],
     });
     if (!salesInvoice) {

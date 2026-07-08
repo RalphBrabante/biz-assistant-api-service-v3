@@ -12,6 +12,10 @@ const {
   getScopedOrganizationId,
   applyOrganizationWhereScope,
 } = require('../services/request-scope');
+const {
+  isPercentageTaxType,
+  isVatTaxType,
+} = require('../services/tax-calculation');
 
 function buildOrderPreviewUrl(orderId) {
   const appBaseUrl = String(process.env.APP_BASE_URL || 'http://localhost').trim();
@@ -188,7 +192,7 @@ function toFixed3(value) {
   return Number(normalizeNumber(value).toFixed(3));
 }
 
-function buildSnapshotFromItem(item, orderedItem = {}, vatRate = 0) {
+function buildSnapshotFromItem(item, orderedItem = {}, taxType = {}) {
   // Snapshot rows preserve pricing/tax values at order time so historical orders stay immutable.
   const quantity = toFixed3(orderedItem.quantity || 1);
   const unitPrice = toFixed2(item.price);
@@ -198,7 +202,7 @@ function buildSnapshotFromItem(item, orderedItem = {}, vatRate = 0) {
       : toFixed2(item.discountedPrice);
   const effectiveUnitPrice =
     discountedUnitPrice !== null ? discountedUnitPrice : unitPrice;
-  const taxRate = toFixed2(vatRate || 0);
+  const taxRate = isVatTaxType(taxType) ? toFixed2(taxType.percentage || 0) : 0;
   const lineSubtotal = toFixed2(unitPrice * quantity);
   const lineDiscount = toFixed2((unitPrice - effectiveUnitPrice) * quantity);
   const lineGross = toFixed2(effectiveUnitPrice * quantity);
@@ -230,7 +234,7 @@ function buildSnapshotFromItem(item, orderedItem = {}, vatRate = 0) {
   };
 }
 
-function computeOrderTotals(snapshotRows = [], shippingAmount = 0, vatRate = 0) {
+function computeOrderTotals(snapshotRows = [], shippingAmount = 0, taxType = {}) {
   // Order totals are computed from snapshot lines, not current item rows.
   // This prevents historical totals from drifting when item prices are changed later.
   const subtotalAmount = toFixed2(
@@ -239,6 +243,7 @@ function computeOrderTotals(snapshotRows = [], shippingAmount = 0, vatRate = 0) 
   const discountAmount = toFixed2(
     snapshotRows.reduce((sum, row) => sum + normalizeNumber(row.lineDiscount), 0)
   );
+  const vatRate = isVatTaxType(taxType) ? Number(taxType.percentage || 0) : 0;
   const taxableAmount = vatRate > 0
     ? toFixed2(subtotalAmount / (1 + vatRate / 100))
     : subtotalAmount;
@@ -490,7 +495,7 @@ async function createOrder(req, res) {
         include: [
           {
             association: 'taxType',
-            attributes: ['id', 'percentage', 'isActive'],
+            attributes: ['id', 'code', 'name', 'percentage', 'isActive'],
             required: false,
           },
         ],
@@ -503,7 +508,7 @@ async function createOrder(req, res) {
           message: 'Organization tax type is required and must be active before creating orders.',
         });
       }
-      const vatRate = Number(organization.taxType.percentage || 0);
+      const organizationTaxType = organization.taxType;
       let withholdingRate = 0;
       try {
         const withholding = await resolveWithholdingRate({
@@ -523,12 +528,12 @@ async function createOrder(req, res) {
       }
 
       const snapshotRows = orderedItems.map((entry) =>
-        buildSnapshotFromItem(itemById.get(entry.itemId), entry, vatRate)
+        buildSnapshotFromItem(itemById.get(entry.itemId), entry, organizationTaxType)
       );
       const stockDemand = buildStockDemand(orderedItems, itemById);
       ensureStockAvailable(itemById, stockDemand);
 
-      const computedTotals = computeOrderTotals(snapshotRows, payload.shippingAmount || 0, vatRate);
+      const computedTotals = computeOrderTotals(snapshotRows, payload.shippingAmount || 0, organizationTaxType);
       // Withholding is applied on taxable base and deducted from payable total.
       const withholdingAmount = toFixed2(computedTotals.taxableAmount * (withholdingRate / 100));
       payload.subtotalAmount = computedTotals.subtotalAmount;
@@ -539,6 +544,9 @@ async function createOrder(req, res) {
       payload.totalAmount = toFixed2(
         Math.max(computedTotals.subtotalAmount + computedTotals.shippingAmount - withholdingAmount, 0)
       );
+      if (isPercentageTaxType(organizationTaxType)) {
+        payload.taxAmount = 0;
+      }
 
       const order = await Order.create(payload, { transaction });
 
@@ -1002,7 +1010,7 @@ async function updateOrder(req, res) {
           include: [
             {
               association: 'taxType',
-              attributes: ['id', 'percentage', 'isActive'],
+              attributes: ['id', 'code', 'name', 'percentage', 'isActive'],
               required: false,
             },
           ],
@@ -1015,7 +1023,7 @@ async function updateOrder(req, res) {
             message: 'Organization tax type is required and must be active before updating orders.',
           });
         }
-        const vatRate = Number(organization.taxType.percentage || 0);
+        const organizationTaxType = organization.taxType;
         let withholdingRate = 0;
         try {
           const withholding = await resolveWithholdingRate({
@@ -1038,7 +1046,7 @@ async function updateOrder(req, res) {
 
         const itemById = new Map(items.map((item) => [item.id, item]));
         const snapshotRows = orderedItems.map((entry) =>
-          buildSnapshotFromItem(itemById.get(entry.itemId), entry, vatRate)
+          buildSnapshotFromItem(itemById.get(entry.itemId), entry, organizationTaxType)
         );
         const stockDemand = buildStockDemand(orderedItems, itemById);
         ensureStockAvailable(itemById, stockDemand);
@@ -1046,12 +1054,12 @@ async function updateOrder(req, res) {
         const computedTotals = computeOrderTotals(
           snapshotRows,
           payload.shippingAmount !== undefined ? payload.shippingAmount : order.shippingAmount,
-          vatRate
+          organizationTaxType
         );
         await order.update(
           {
             subtotalAmount: computedTotals.subtotalAmount,
-            taxAmount: computedTotals.taxAmount,
+            taxAmount: isPercentageTaxType(organizationTaxType) ? 0 : computedTotals.taxAmount,
             withHoldingTaxAmount: toFixed2(computedTotals.taxableAmount * (withholdingRate / 100)),
             discountAmount: computedTotals.discountAmount,
             shippingAmount: computedTotals.shippingAmount,
@@ -1089,7 +1097,7 @@ async function updateOrder(req, res) {
           include: [
             {
               association: 'taxType',
-              attributes: ['id', 'percentage', 'isActive'],
+              attributes: ['id', 'code', 'name', 'percentage', 'isActive'],
               required: false,
             },
           ],
@@ -1102,7 +1110,7 @@ async function updateOrder(req, res) {
             message: 'Organization tax type is required and must be active before updating orders.',
           });
         }
-        const vatRate = Number(organization.taxType.percentage || 0);
+        const organizationTaxType = organization.taxType;
         let withholdingRate = 0;
         try {
           const withholding = await resolveWithholdingRate({
@@ -1129,13 +1137,13 @@ async function updateOrder(req, res) {
         const computedTotals = computeOrderTotals(
           existingSnapshots.map((row) => row.toJSON()),
           payload.shippingAmount !== undefined ? payload.shippingAmount : order.shippingAmount,
-          vatRate
+          organizationTaxType
         );
         const withholdingAmount = toFixed2(computedTotals.taxableAmount * (withholdingRate / 100));
         await order.update(
           {
             subtotalAmount: computedTotals.subtotalAmount,
-            taxAmount: computedTotals.taxAmount,
+            taxAmount: isPercentageTaxType(organizationTaxType) ? 0 : computedTotals.taxAmount,
             withHoldingTaxAmount: withholdingAmount,
             discountAmount: computedTotals.discountAmount,
             shippingAmount: computedTotals.shippingAmount,

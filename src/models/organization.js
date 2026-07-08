@@ -56,6 +56,24 @@ function initOrganizationModel(sequelize) {
         type: DataTypes.UUID,
         allowNull: true,
       },
+      taxpayerClassification: {
+        type: DataTypes.STRING(40),
+        allowNull: true,
+      },
+      deductionMethod: {
+        type: DataTypes.STRING(30),
+        allowNull: false,
+        defaultValue: 'itemized',
+      },
+      incomeTaxRate: {
+        type: DataTypes.DECIMAL(5, 2),
+        allowNull: true,
+      },
+      isIncomeTaxExempt: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
       contactEmail: {
         type: DataTypes.STRING(255),
         allowNull: false,
@@ -106,6 +124,7 @@ function initOrganizationModel(sequelize) {
         { fields: ['name'] },
         { fields: ['contact_email'] },
         { fields: ['tax_type_id'] },
+        { fields: ['taxpayer_classification'] },
       ],
     }
   );

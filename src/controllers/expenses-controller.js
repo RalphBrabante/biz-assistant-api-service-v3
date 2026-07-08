@@ -18,6 +18,10 @@ const {
   getAuthenticatedOrganizationId,
   applyOrganizationWhereScope,
 } = require('../services/request-scope');
+const {
+  isPercentageTaxType,
+  isVatTaxType,
+} = require('../services/tax-calculation');
 
 function getExpenseModels() {
   const models = getModels();
@@ -142,18 +146,24 @@ function computeExpenseAmounts({
   amount = 0,
   vatExemptAmount = 0,
   discountAmount = 0,
-  vatPercentage = 0,
+  taxType = {},
   withholdingPercentage = 0,
 }) {
   const safeAmount = Math.max(roundCurrency(amount), 0);
-  const safeVatExempt = Math.max(roundCurrency(vatExemptAmount), 0);
   const safeDiscount = Math.max(roundCurrency(discountAmount), 0);
-  const safeVatPercentage = Math.max(Number(vatPercentage || 0), 0);
   const safeWithholdingPercentage = Math.max(Number(withholdingPercentage || 0), 0);
+  const safeVatPercentage = isVatTaxType(taxType)
+    ? Math.max(Number(taxType.percentage || 0), 0)
+    : 0;
+  const safeVatExempt = isPercentageTaxType(taxType)
+    ? safeAmount
+    : Math.max(roundCurrency(vatExemptAmount), 0);
 
   // VAT is treated as tax-inclusive on the taxable portion:
   // taxableNet = taxableGross / (1 + vatRate), tax = taxableNet * vatRate
-  const taxableGross = Math.max(safeAmount - safeVatExempt, 0);
+  const taxableGross = isPercentageTaxType(taxType)
+    ? safeAmount
+    : Math.max(safeAmount - safeVatExempt, 0);
   const vatRate = safeVatPercentage / 100;
   const taxableNet = vatRate > 0
     ? roundCurrency(taxableGross / (1 + vatRate))
@@ -378,7 +388,7 @@ async function importExpenses(req, res) {
       include: [
         {
           association: 'taxType',
-          attributes: ['id', 'percentage', 'isActive'],
+          attributes: ['id', 'code', 'name', 'percentage', 'isActive'],
           required: false,
         },
       ],
@@ -478,7 +488,7 @@ async function importExpenses(req, res) {
           amount: payload.amount,
           vatExemptAmount: payload.vatExemptAmount,
           discountAmount: payload.discountAmount,
-          vatPercentage: Number(organization.taxType.percentage || 0),
+          taxType: organization.taxType,
           withholdingPercentage: withholdingTaxPercentage,
         })
       );
@@ -577,7 +587,7 @@ async function createExpense(req, res, next) {
       include: [
         {
           association: 'taxType',
-          attributes: ['id', 'percentage', 'isActive'],
+          attributes: ['id', 'code', 'name', 'percentage', 'isActive'],
           required: false,
         },
       ],
@@ -611,7 +621,7 @@ async function createExpense(req, res, next) {
         amount: payload.amount,
         vatExemptAmount: payload.vatExemptAmount,
         discountAmount: payload.discountAmount,
-        vatPercentage: Number(organization.taxType.percentage || 0),
+        taxType: organization.taxType,
         withholdingPercentage: withholdingTaxPercentage,
       })
     );
@@ -1018,7 +1028,7 @@ async function transferExpense(req, res) {
       include: [
         {
           association: 'taxType',
-          attributes: ['id', 'percentage', 'isActive'],
+          attributes: ['id', 'code', 'name', 'percentage', 'isActive'],
           required: false,
         },
       ],
@@ -1119,7 +1129,7 @@ async function transferExpense(req, res) {
         amount: expense.amount,
         vatExemptAmount: expense.vatExemptAmount,
         discountAmount: expense.discountAmount,
-        vatPercentage: Number(targetOrganization.taxType.percentage || 0),
+        taxType: targetOrganization.taxType,
         withholdingPercentage: withholdingTaxPercentage,
       })
     );
@@ -1200,7 +1210,7 @@ async function updateExpense(req, res) {
       include: [
         {
           association: 'taxType',
-          attributes: ['id', 'percentage', 'isActive'],
+          attributes: ['id', 'code', 'name', 'percentage', 'isActive'],
           required: false,
         },
       ],
@@ -1241,11 +1251,12 @@ async function updateExpense(req, res) {
       amount: payload.amount ?? expense.amount,
       vatExemptAmount: payload.vatExemptAmount ?? expense.vatExemptAmount,
       discountAmount: payload.discountAmount ?? expense.discountAmount,
-      vatPercentage: Number(organization.taxType.percentage || 0),
+      taxType: organization.taxType,
       withholdingPercentage: withholdingTaxPercentage,
     });
     payload.amount = computed.amount;
     payload.vatExemptAmount = computed.vatExemptAmount;
+    payload.taxableAmount = computed.taxableAmount;
     payload.discountAmount = computed.discountAmount;
     payload.taxAmount = computed.taxAmount;
     payload.withHoldingTaxAmount = computed.withHoldingTaxAmount;

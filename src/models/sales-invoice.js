@@ -60,6 +60,10 @@ function initSalesInvoiceModel(sequelize) {
         allowNull: false,
         defaultValue: 0.0,
       },
+      withholdingTaxTypeId: {
+        type: DataTypes.UUID,
+        allowNull: true,
+      },
       subtotalAmount: {
         type: DataTypes.DECIMAL(12, 2),
         allowNull: false,
@@ -119,6 +123,7 @@ function initSalesInvoiceModel(sequelize) {
         { fields: ['organization_id'] },
         { fields: ['status'] },
         { fields: ['payment_status'] },
+        { fields: ['withholding_tax_type_id'] },
         { fields: ['issue_date'] },
         { fields: ['due_date'] },
         { fields: ['created_by'] },

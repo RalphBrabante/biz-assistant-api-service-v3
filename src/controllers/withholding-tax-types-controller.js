@@ -65,8 +65,11 @@ async function listWithholdingTaxTypes(req, res) {
       where.isActive = true;
     }
 
-    if (String(req.query.appliesTo || '').trim()) {
-      where.appliesTo = String(req.query.appliesTo).trim();
+    const appliesTo = String(req.query.appliesTo || '').trim().toLowerCase();
+    if (appliesTo) {
+      where.appliesTo = appliesTo === 'invoice' || appliesTo === 'expense'
+        ? { [Op.in]: [appliesTo, 'both'] }
+        : appliesTo;
     }
 
     const q = String(req.query.q || '').trim();

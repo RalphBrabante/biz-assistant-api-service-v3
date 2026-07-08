@@ -1192,6 +1192,26 @@ function initModels(sequelize) {
     as: 'withholdingTaxType',
   });
 
+  WithholdingTaxType.hasMany(SalesInvoice, {
+    foreignKey: {
+      name: 'withholdingTaxTypeId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'salesInvoices',
+  });
+
+  SalesInvoice.belongsTo(WithholdingTaxType, {
+    foreignKey: {
+      name: 'withholdingTaxTypeId',
+      allowNull: true,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL',
+    as: 'withholdingTaxType',
+  });
+
   Organization.hasMany(QuarterlySalesReport, {
     foreignKey: {
       name: 'organizationId',

@@ -47,6 +47,10 @@ function pickOrganizationPayload(body = {}) {
     country: body.country,
     currency: body.currency,
     taxTypeId: body.taxTypeId,
+    taxpayerClassification: body.taxpayerClassification,
+    deductionMethod: body.deductionMethod,
+    incomeTaxRate: body.incomeTaxRate,
+    isIncomeTaxExempt: body.isIncomeTaxExempt,
     contactEmail: body.contactEmail,
     phone: body.phone,
     website: body.website,
@@ -56,6 +60,39 @@ function pickOrganizationPayload(body = {}) {
     notes: body.notes,
     isActive: body.isActive,
   };
+}
+
+function normalizeTaxpayerProfile(payload = {}) {
+  const allowedClassifications = new Set([
+    'individual',
+    'corporation',
+    'partnership',
+    'estate_trust',
+    'non_stock_non_profit',
+    'other',
+  ]);
+  const allowedDeductionMethods = new Set(['itemized', 'osd', 'none']);
+
+  if (payload.taxpayerClassification !== undefined) {
+    const value = String(payload.taxpayerClassification || '').trim().toLowerCase();
+    payload.taxpayerClassification = value && allowedClassifications.has(value) ? value : null;
+  }
+
+  if (payload.deductionMethod !== undefined) {
+    const value = String(payload.deductionMethod || '').trim().toLowerCase();
+    payload.deductionMethod = allowedDeductionMethods.has(value) ? value : 'itemized';
+  }
+
+  if (payload.incomeTaxRate !== undefined) {
+    const rate = payload.incomeTaxRate === null || payload.incomeTaxRate === ''
+      ? null
+      : Number(payload.incomeTaxRate);
+    payload.incomeTaxRate = Number.isFinite(rate) && rate >= 0 ? rate : null;
+  }
+
+  if (payload.isIncomeTaxExempt !== undefined) {
+    payload.isIncomeTaxExempt = Boolean(payload.isIncomeTaxExempt);
+  }
 }
 
 function cleanUndefined(payload) {
@@ -139,6 +176,7 @@ async function createOrganization(req, res) {
     const { Organization, TaxType } = orgModels;
 
     const payload = cleanUndefined(pickOrganizationPayload(req.body));
+    normalizeTaxpayerProfile(payload);
 
     if (!payload.name) {
       return res.status(400).json({ ok: false, message: 'name is required.' });
@@ -701,6 +739,7 @@ async function updateOrganization(req, res) {
     }
 
     const payload = cleanUndefined(pickOrganizationPayload(req.body));
+    normalizeTaxpayerProfile(payload);
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ ok: false, message: 'No valid fields provided for update.' });
     }

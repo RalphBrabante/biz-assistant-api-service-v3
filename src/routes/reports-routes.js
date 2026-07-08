@@ -10,6 +10,7 @@ const {
   getQuarterlyExpenseReportById,
   getQuarterlyExpenseReportPreviewById,
   deleteQuarterlyExpenseReport,
+  getBirFilingSummary,
 } = require('../controllers/reports-controller');
 const { authorize } = require('../middleware/authz');
 
@@ -25,5 +26,6 @@ router.get('/quarterly-expenses', authorize('reports.read'), listQuarterlyExpens
 router.get('/quarterly-expenses/:id', authorize('reports.read'), getQuarterlyExpenseReportById);
 router.get('/quarterly-expenses/:id/preview', authorize('reports.read'), getQuarterlyExpenseReportPreviewById);
 router.delete('/quarterly-expenses/:id', authorize('reports.delete'), deleteQuarterlyExpenseReport);
+router.get('/bir-filing-summary', authorize('reports.read'), getBirFilingSummary);
 
 module.exports = router;
