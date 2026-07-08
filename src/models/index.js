@@ -20,6 +20,10 @@ const {
   PurchaseOrder,
 } = require('./purchase-order');
 const { initVendorModel, Vendor } = require('./vendor');
+const {
+  initVendorOrganizationModel,
+  VendorOrganization,
+} = require('./vendor-organization');
 const { initOrderModel, Order } = require('./order');
 const { initSalesInvoiceModel, SalesInvoice } = require('./sales-invoice');
 const { initExpenseModel, Expense } = require('./expense');
@@ -62,6 +66,7 @@ function initModels(sequelize) {
   initRolePermissionModel(sequelize);
   initPurchaseOrderModel(sequelize);
   initVendorModel(sequelize);
+  initVendorOrganizationModel(sequelize);
   initOrderModel(sequelize);
   initSalesInvoiceModel(sequelize);
   initExpenseModel(sequelize);
@@ -507,6 +512,64 @@ function initModels(sequelize) {
     onUpdate: 'CASCADE',
     onDelete: 'CASCADE',
     as: 'organization',
+  });
+
+  Vendor.hasMany(VendorOrganization, {
+    foreignKey: {
+      name: 'vendorId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'organizationLinks',
+  });
+
+  VendorOrganization.belongsTo(Vendor, {
+    foreignKey: {
+      name: 'vendorId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'vendor',
+  });
+
+  Organization.hasMany(VendorOrganization, {
+    foreignKey: {
+      name: 'organizationId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'vendorLinks',
+  });
+
+  VendorOrganization.belongsTo(Organization, {
+    foreignKey: {
+      name: 'organizationId',
+      allowNull: false,
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'organization',
+  });
+
+  Vendor.belongsToMany(Organization, {
+    through: VendorOrganization,
+    foreignKey: 'vendorId',
+    otherKey: 'organizationId',
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'organizations',
+  });
+
+  Organization.belongsToMany(Vendor, {
+    through: VendorOrganization,
+    foreignKey: 'organizationId',
+    otherKey: 'vendorId',
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    as: 'assignedVendors',
   });
 
   User.hasMany(Vendor, {
@@ -1283,6 +1346,7 @@ function initModels(sequelize) {
     RolePermission,
     PurchaseOrder,
     Vendor,
+    VendorOrganization,
     Order,
     SalesInvoice,
     Expense,

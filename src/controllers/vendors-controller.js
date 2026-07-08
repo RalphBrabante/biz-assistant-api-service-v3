@@ -17,32 +17,199 @@ function getAuthenticatedUserId(req) {
   return req.auth?.user?.id || req.auth?.userId || null;
 }
 
-async function getSharedVendorOrganizationIds(req, models, targetOrganizationId) {
-  const userId = getAuthenticatedUserId(req);
-  if (!userId || !models.OrganizationUser) {
-    return [targetOrganizationId].filter(Boolean);
+function normalizeIdList(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return [];
+  }
+  if (raw.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed)
+        ? parsed.map((item) => String(item || '').trim()).filter(Boolean)
+        : [];
+    } catch (_err) {
+      return [];
+    }
+  }
+  return raw.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+async function userHasActiveOrganizationMembership(models, userId, organizationId) {
+  if (!models?.OrganizationUser || !userId || !organizationId) {
+    return false;
   }
 
-  const memberships = await models.OrganizationUser.findAll({
+  const membership = await models.OrganizationUser.findOne({
     where: {
       userId,
+      organizationId,
       isActive: true,
     },
-    attributes: ['organizationId'],
+    attributes: ['id'],
   });
-  const organizationIds = memberships
-    .map((membership) => membership.organizationId)
-    .filter(Boolean);
+
+  return Boolean(membership);
+}
+
+async function userCanAccessOrganization(models, req, organizationId) {
+  if (isPrivilegedRequest(req)) {
+    return true;
+  }
   const authOrgId = req.auth?.user?.organizationId || null;
-  if (authOrgId && !organizationIds.includes(authOrgId)) {
-    organizationIds.push(authOrgId);
+  if (authOrgId && authOrgId === organizationId) {
+    return true;
+  }
+  return userHasActiveOrganizationMembership(models, getAuthenticatedUserId(req), organizationId);
+}
+
+async function resolveListOrganizationId(req, models) {
+  const requestedOrganizationId = String(req.query.organizationId || '').trim();
+  const fallback = resolveOrganizationId(req);
+  const organizationId = requestedOrganizationId || fallback;
+  if (!organizationId) {
+    return '';
+  }
+  if (!await userCanAccessOrganization(models, req, organizationId)) {
+    return '';
+  }
+  return organizationId;
+}
+
+async function resolveAllowedOrganizationIds(req, models, ownerOrganizationId) {
+  const requestedIds = normalizeIdList(req.body?.organizationIds);
+  const ids = Array.from(new Set([ownerOrganizationId, ...requestedIds].filter(Boolean)));
+  const allowedIds = [];
+  for (const organizationId of ids) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await userCanAccessOrganization(models, req, organizationId)) {
+      allowedIds.push(organizationId);
+    }
+  }
+  return allowedIds;
+}
+
+async function vendorIdsLinkedToOrganization(models, organizationId) {
+  if (!models.VendorOrganization || !organizationId) {
+    return [];
+  }
+  const links = await models.VendorOrganization.findAll({
+    where: { organizationId },
+    attributes: ['vendorId'],
+  });
+  return links.map((link) => link.vendorId).filter(Boolean);
+}
+
+async function vendorAccessWhere(models, req, vendorId) {
+  const where = { id: vendorId };
+  if (isPrivilegedRequest(req)) {
+    return where;
   }
 
-  if (!targetOrganizationId || organizationIds.includes(targetOrganizationId)) {
-    return organizationIds;
+  const organizationId = resolveOrganizationId(req);
+  if (!organizationId) {
+    return null;
+  }
+  const linkedVendorIds = await vendorIdsLinkedToOrganization(models, organizationId);
+  return {
+    id: vendorId,
+    [Op.or]: [
+      { organizationId },
+      ...(linkedVendorIds.length > 0 ? [{ id: { [Op.in]: linkedVendorIds } }] : []),
+    ],
+  };
+}
+
+async function syncVendorOrganizations(models, vendor, organizationIds, actorId) {
+  if (!models.VendorOrganization || !vendor?.id) {
+    return;
+  }
+  const ids = Array.from(new Set([vendor.organizationId, ...organizationIds].filter(Boolean)));
+  await models.VendorOrganization.destroy({
+    where: {
+      vendorId: vendor.id,
+      organizationId: { [Op.notIn]: ids },
+    },
+  });
+  for (const organizationId of ids) {
+    // eslint-disable-next-line no-await-in-loop
+    const [link] = await models.VendorOrganization.findOrCreate({
+      where: {
+        vendorId: vendor.id,
+        organizationId,
+      },
+      defaults: {
+        vendorId: vendor.id,
+        organizationId,
+        isOwner: organizationId === vendor.organizationId,
+        createdBy: actorId || null,
+        updatedBy: actorId || null,
+      },
+    });
+    if (link.isOwner !== (organizationId === vendor.organizationId) || link.updatedBy !== (actorId || null)) {
+      // eslint-disable-next-line no-await-in-loop
+      await link.update({
+        isOwner: organizationId === vendor.organizationId,
+        updatedBy: actorId || null,
+      });
+    }
+  }
+}
+
+async function findVendorTaxConflict(models, taxId, organizationIds, excludeVendorId = null) {
+  const cleanedTaxId = String(taxId || '').trim();
+  if (!cleanedTaxId) {
+    return null;
   }
 
-  return isPrivilegedRequest(req) ? [targetOrganizationId] : [];
+  for (const organizationId of organizationIds) {
+    // eslint-disable-next-line no-await-in-loop
+    const linkedVendorIds = await vendorIdsLinkedToOrganization(models, organizationId);
+    const where = {
+      taxId: cleanedTaxId,
+      [Op.and]: [
+        {
+          [Op.or]: [
+            { organizationId },
+            ...(linkedVendorIds.length > 0 ? [{ id: { [Op.in]: linkedVendorIds } }] : []),
+          ],
+        },
+      ],
+    };
+    if (excludeVendorId) {
+      where.id = { [Op.ne]: excludeVendorId };
+    }
+    // eslint-disable-next-line no-await-in-loop
+    const existing = await models.Vendor.findOne({
+      where,
+      attributes: ['id', 'name', 'taxId'],
+    });
+    if (existing) {
+      return existing;
+    }
+  }
+
+  return null;
+}
+
+function vendorInclude(models) {
+  return [
+    {
+      model: models.Organization,
+      as: 'organization',
+      attributes: ['id', 'name', 'legalName'],
+      required: false,
+    },
+    {
+      association: 'organizations',
+      attributes: ['id', 'name', 'legalName'],
+      through: { attributes: ['isOwner'] },
+      required: false,
+    },
+  ];
 }
 
 function pickVendorPayload(body = {}) {
@@ -97,7 +264,7 @@ function csvValue(value) {
 async function importVendors(req, res, next) {
   try {
     const models = getModels();
-    if (!models || !models.Vendor) {
+    if (!models || !models.Vendor || !models.VendorOrganization) {
       return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
     }
 
@@ -166,7 +333,8 @@ async function importVendors(req, res, next) {
 
       try {
         // eslint-disable-next-line no-await-in-loop
-        await Vendor.create(payload);
+        const vendor = await Vendor.create(payload);
+        await syncVendorOrganizations(models, vendor, [organizationId], req.auth?.user?.id || null);
         imported += 1;
       } catch (rowErr) {
         skipped += 1;
@@ -192,16 +360,26 @@ async function importVendors(req, res, next) {
 async function exportVendors(req, res, next) {
   try {
     const models = getModels();
-    if (!models || !models.Vendor) {
+    if (!models || !models.Vendor || !models.VendorOrganization || !models.Organization) {
       return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
     }
 
-    const organizationId = resolveOrganizationId(req);
+    const organizationId = await resolveListOrganizationId(req, models);
     if (!organizationId) {
       return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
     }
 
-    const where = { organizationId };
+    const linkedVendorIds = await vendorIdsLinkedToOrganization(models, organizationId);
+    const where = {
+      [Op.and]: [
+        {
+          [Op.or]: [
+            { organizationId },
+            ...(linkedVendorIds.length > 0 ? [{ id: { [Op.in]: linkedVendorIds } }] : []),
+          ],
+        },
+      ],
+    };
     if (req.query.status) {
       where.status = String(req.query.status).toLowerCase();
     }
@@ -211,16 +389,18 @@ async function exportVendors(req, res, next) {
 
     const q = String(req.query.q || '').trim();
     if (q) {
-      where[Op.or] = [
-        { name: { [Op.like]: `%${q}%` } },
-        { category: { [Op.like]: `%${q}%` } },
-        { legalName: { [Op.like]: `%${q}%` } },
-        { taxId: { [Op.like]: `%${q}%` } },
-        { contactPerson: { [Op.like]: `%${q}%` } },
-        { contactEmail: { [Op.like]: `%${q}%` } },
-        { barangay: { [Op.like]: `%${q}%` } },
-        { province: { [Op.like]: `%${q}%` } },
-      ];
+      where[Op.and].push({
+        [Op.or]: [
+          { name: { [Op.like]: `%${q}%` } },
+          { category: { [Op.like]: `%${q}%` } },
+          { legalName: { [Op.like]: `%${q}%` } },
+          { taxId: { [Op.like]: `%${q}%` } },
+          { contactPerson: { [Op.like]: `%${q}%` } },
+          { contactEmail: { [Op.like]: `%${q}%` } },
+          { barangay: { [Op.like]: `%${q}%` } },
+          { province: { [Op.like]: `%${q}%` } },
+        ],
+      });
     }
 
     const { Vendor } = models;
@@ -298,15 +478,11 @@ async function exportVendors(req, res, next) {
 async function listVendors(req, res, next) {
   try {
     const models = getModels();
-    if (!models || !models.Vendor || !models.Organization) {
+    if (!models || !models.Vendor || !models.Organization || !models.VendorOrganization) {
       return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
     }
 
-    const includeShared = String(req.query.includeShared || '').toLowerCase() === 'true';
-    const requestedOrganizationId = String(req.query.organizationId || '').trim();
-    const organizationId = includeShared && requestedOrganizationId
-      ? requestedOrganizationId
-      : resolveOrganizationId(req);
+    const organizationId = await resolveListOrganizationId(req, models);
     if (!organizationId) {
       return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
     }
@@ -315,13 +491,16 @@ async function listVendors(req, res, next) {
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
     const offset = (page - 1) * limit;
 
-    const where = {};
-    if (includeShared) {
-      const sharedOrganizationIds = await getSharedVendorOrganizationIds(req, models, organizationId);
-      where.organizationId = { [Op.in]: sharedOrganizationIds };
-    } else {
-      where.organizationId = organizationId;
-    }
+    const linkedVendorIds = await vendorIdsLinkedToOrganization(models, organizationId);
+    const scopeOr = [
+      { organizationId },
+      ...(linkedVendorIds.length > 0 ? [{ id: { [Op.in]: linkedVendorIds } }] : []),
+    ];
+    const where = {
+      [Op.and]: [
+        { [Op.or]: scopeOr },
+      ],
+    };
     if (req.query.status) {
       where.status = String(req.query.status).toLowerCase();
     }
@@ -331,29 +510,25 @@ async function listVendors(req, res, next) {
 
     const q = String(req.query.q || '').trim();
     if (q) {
-      where[Op.or] = [
-        { name: { [Op.like]: `%${q}%` } },
-        { category: { [Op.like]: `%${q}%` } },
-        { legalName: { [Op.like]: `%${q}%` } },
-        { taxId: { [Op.like]: `%${q}%` } },
-        { contactPerson: { [Op.like]: `%${q}%` } },
-        { contactEmail: { [Op.like]: `%${q}%` } },
-        { barangay: { [Op.like]: `%${q}%` } },
-        { province: { [Op.like]: `%${q}%` } },
-      ];
+      where[Op.and].push({
+        [Op.or]: [
+          { name: { [Op.like]: `%${q}%` } },
+          { category: { [Op.like]: `%${q}%` } },
+          { legalName: { [Op.like]: `%${q}%` } },
+          { taxId: { [Op.like]: `%${q}%` } },
+          { contactPerson: { [Op.like]: `%${q}%` } },
+          { contactEmail: { [Op.like]: `%${q}%` } },
+          { barangay: { [Op.like]: `%${q}%` } },
+          { province: { [Op.like]: `%${q}%` } },
+        ],
+      });
     }
 
-    const { Vendor, Organization } = models;
+    const { Vendor } = models;
     const { rows, count } = await Vendor.findAndCountAll({
       where,
-      include: [
-        {
-          model: Organization,
-          as: 'organization',
-          attributes: ['id', 'name', 'legalName'],
-          required: false,
-        },
-      ],
+      include: vendorInclude(models),
+      distinct: true,
       order: [['createdAt', 'DESC']],
       limit,
       offset,
@@ -378,7 +553,7 @@ async function listVendors(req, res, next) {
 async function createVendor(req, res, next) {
   try {
     const models = getModels();
-    if (!models || !models.Vendor) {
+    if (!models || !models.Vendor || !models.VendorOrganization || !models.Organization) {
       return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
     }
 
@@ -404,27 +579,31 @@ async function createVendor(req, res, next) {
     }
 
     const { Vendor } = models;
+    const actorId = req.auth?.user?.id || req.auth?.userId || null;
+    const organizationIds = await resolveAllowedOrganizationIds(req, models, organizationId);
+    if (!organizationIds.includes(organizationId)) {
+      return res.status(403).json({ code: 'FORBIDDEN', message: 'You do not have access to this organization.' });
+    }
 
     const taxId = String(payload.taxId || '').trim();
-    if (taxId) {
-      const existing = await Vendor.findOne({
-        where: { organizationId, taxId },
-        attributes: ['id', 'name'],
+    const existing = await findVendorTaxConflict(models, taxId, organizationIds);
+    if (existing) {
+      return res.status(409).json({
+        code: 'CONFLICT',
+        message: `A vendor with TIN "${taxId}" already exists (${existing.name}).`,
       });
-      if (existing) {
-        return res.status(409).json({
-          code: 'CONFLICT',
-          message: `A vendor with TIN "${taxId}" already exists (${existing.name}).`,
-        });
-      }
     }
 
     const vendor = await Vendor.create(payload);
+    await syncVendorOrganizations(models, vendor, organizationIds, actorId);
+    const created = await Vendor.findByPk(vendor.id, {
+      include: vendorInclude(models),
+    });
 
     return res.status(201).json({
       code: 'CREATED',
       message: 'Vendor created successfully.',
-      data: vendor,
+      data: created || vendor,
     });
   } catch (err) {
     return next(err);
@@ -434,32 +613,19 @@ async function createVendor(req, res, next) {
 async function getVendorById(req, res, next) {
   try {
     const models = getModels();
-    if (!models || !models.Vendor || !models.Organization) {
+    if (!models || !models.Vendor || !models.Organization || !models.VendorOrganization) {
       return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
     }
 
-    const { Vendor, Organization } = models;
-    const where = {
-      id: req.params.id,
-    };
-    if (!isPrivilegedRequest(req)) {
-      const organizationId = resolveOrganizationId(req);
-      if (!organizationId) {
-        return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
-      }
-      where.organizationId = organizationId;
+    const { Vendor } = models;
+    const where = await vendorAccessWhere(models, req, req.params.id);
+    if (!where) {
+      return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
     }
 
     const vendor = await Vendor.findOne({
       where,
-      include: [
-        {
-          model: Organization,
-          as: 'organization',
-          attributes: ['id', 'name', 'legalName'],
-          required: false,
-        },
-      ],
+      include: vendorInclude(models),
     });
 
     if (!vendor) {
@@ -475,20 +641,14 @@ async function getVendorById(req, res, next) {
 async function updateVendor(req, res, next) {
   try {
     const models = getModels();
-    if (!models || !models.Vendor) {
+    if (!models || !models.Vendor || !models.VendorOrganization || !models.Organization) {
       return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
     }
 
     const { Vendor } = models;
-    const where = {
-      id: req.params.id,
-    };
-    if (!isPrivilegedRequest(req)) {
-      const organizationId = resolveOrganizationId(req);
-      if (!organizationId) {
-        return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
-      }
-      where.organizationId = organizationId;
+    const where = await vendorAccessWhere(models, req, req.params.id);
+    if (!where) {
+      return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
     }
 
     const vendor = await Vendor.findOne({
@@ -510,14 +670,31 @@ async function updateVendor(req, res, next) {
         });
       }
     }
-    payload.updatedBy = req.auth?.user?.id || payload.updatedBy || vendor.updatedBy || null;
+    const actorId = req.auth?.user?.id || req.auth?.userId || payload.updatedBy || vendor.updatedBy || null;
+    payload.updatedBy = actorId;
+
+    const organizationIds = await resolveAllowedOrganizationIds(req, models, vendor.organizationId);
+    const effectiveTaxId = Object.prototype.hasOwnProperty.call(payload, 'taxId') ? payload.taxId : vendor.taxId;
+    const existing = await findVendorTaxConflict(models, effectiveTaxId, organizationIds, vendor.id);
+    if (existing) {
+      return res.status(409).json({
+        code: 'CONFLICT',
+        message: `A vendor with TIN "${effectiveTaxId}" already exists (${existing.name}).`,
+      });
+    }
 
     await vendor.update(payload);
+    if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'organizationIds')) {
+      await syncVendorOrganizations(models, vendor, organizationIds, actorId);
+    }
+    const updated = await Vendor.findByPk(vendor.id, {
+      include: vendorInclude(models),
+    });
 
     return res.status(200).json({
       code: 'SUCCESS',
       message: 'Vendor updated successfully.',
-      data: vendor,
+      data: updated || vendor,
     });
   } catch (err) {
     return next(err);
@@ -527,20 +704,14 @@ async function updateVendor(req, res, next) {
 async function deleteVendor(req, res, next) {
   try {
     const models = getModels();
-    if (!models || !models.Vendor) {
+    if (!models || !models.Vendor || !models.VendorOrganization) {
       return res.status(503).json({ code: 'SERVICE_UNAVAILABLE', message: 'Database models are not ready yet.' });
     }
 
     const { Vendor } = models;
-    const where = {
-      id: req.params.id,
-    };
-    if (!isPrivilegedRequest(req)) {
-      const organizationId = resolveOrganizationId(req);
-      if (!organizationId) {
-        return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
-      }
-      where.organizationId = organizationId;
+    const where = await vendorAccessWhere(models, req, req.params.id);
+    if (!where) {
+      return res.status(400).json({ code: 'BAD_REQUEST', message: 'organizationId could not be resolved from authenticated user.' });
     }
 
     const vendor = await Vendor.findOne({

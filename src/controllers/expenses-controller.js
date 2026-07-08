@@ -25,6 +25,7 @@ function getExpenseModels() {
     !models
     || !models.Expense
     || !models.Vendor
+    || !models.VendorOrganization
     || !models.Organization
     || !models.OrganizationUser
     || !models.TaxType
@@ -35,6 +36,7 @@ function getExpenseModels() {
   return {
     Expense: models.Expense,
     Vendor: models.Vendor,
+    VendorOrganization: models.VendorOrganization,
     Organization: models.Organization,
     OrganizationUser: models.OrganizationUser,
     License: models.License || null,
@@ -242,6 +244,17 @@ async function userCanUseVendorForExpenseOrganization(models, req, vendor, expen
     return true;
   }
 
+  const vendorOrganization = await models.VendorOrganization.findOne({
+    where: {
+      vendorId: vendor.id,
+      organizationId: expenseOrganizationId,
+    },
+    attributes: ['id'],
+  });
+  if (!vendorOrganization) {
+    return false;
+  }
+
   if (isPrivilegedRequest(req)) {
     return true;
   }
@@ -249,7 +262,6 @@ async function userCanUseVendorForExpenseOrganization(models, req, vendor, expen
   const userId = getAuthenticatedUserId(req);
   return (
     await userHasActiveOrganizationMembership(models, userId, expenseOrganizationId)
-    && await userHasActiveOrganizationMembership(models, userId, vendor.organizationId)
   );
 }
 
@@ -403,13 +415,16 @@ async function importExpenses(req, res) {
       const vendor = await Vendor.findOne({
         where: {
           id: vendorId,
-          organizationId,
         },
       });
 
-      if (!vendor) {
+      // eslint-disable-next-line no-await-in-loop
+      const canUseVendor = vendor
+        ? await userCanUseVendorForExpenseOrganization(models, req, vendor, organizationId)
+        : false;
+      if (!vendor || !canUseVendor) {
         skipped += 1;
-        errors.push(`Row ${rowNum}: vendorId does not belong to the target organization.`);
+        errors.push(`Row ${rowNum}: vendorId is not assigned to the target organization.`);
         continue;
       }
 
