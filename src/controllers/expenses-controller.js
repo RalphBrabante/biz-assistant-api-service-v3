@@ -19,7 +19,6 @@ const {
   applyOrganizationWhereScope,
 } = require('../services/request-scope');
 const {
-  isPercentageTaxType,
   isVatTaxType,
 } = require('../services/tax-calculation');
 
@@ -155,15 +154,11 @@ function computeExpenseAmounts({
   const safeVatPercentage = isVatTaxType(taxType)
     ? Math.max(Number(taxType.percentage || 0), 0)
     : 0;
-  const safeVatExempt = isPercentageTaxType(taxType)
-    ? safeAmount
-    : Math.max(roundCurrency(vatExemptAmount), 0);
+  const safeVatExempt = Math.min(Math.max(roundCurrency(vatExemptAmount), 0), safeAmount);
 
   // VAT is treated as tax-inclusive on the taxable portion:
   // taxableNet = taxableGross / (1 + vatRate), tax = taxableNet * vatRate
-  const taxableGross = isPercentageTaxType(taxType)
-    ? safeAmount
-    : Math.max(safeAmount - safeVatExempt, 0);
+  const taxableGross = Math.max(safeAmount - safeVatExempt, 0);
   const vatRate = safeVatPercentage / 100;
   const taxableNet = vatRate > 0
     ? roundCurrency(taxableGross / (1 + vatRate))
@@ -213,6 +208,83 @@ function expenseInclude(models) {
       required: false,
     },
   ];
+}
+
+async function findVendorLinkedToOrganization(models, vendorId, organizationId) {
+  if (!vendorId || !organizationId) {
+    return null;
+  }
+
+  const directVendor = await models.Vendor.findOne({
+    where: {
+      id: vendorId,
+      organizationId,
+    },
+  });
+  if (directVendor) {
+    return directVendor;
+  }
+
+  const linkedVendor = await models.Vendor.findOne({
+    where: { id: vendorId },
+    include: [
+      {
+        association: 'organizationLinks',
+        where: { organizationId },
+        required: true,
+      },
+    ],
+  });
+  return linkedVendor || null;
+}
+
+async function findVendorByTaxIdForOrganization(models, taxId, organizationId) {
+  const cleanedTaxId = String(taxId || '').trim();
+  if (!cleanedTaxId || !organizationId) {
+    return null;
+  }
+
+  const ownedVendor = await models.Vendor.findOne({
+    where: {
+      organizationId,
+      taxId: cleanedTaxId,
+    },
+  });
+  if (ownedVendor) {
+    return ownedVendor;
+  }
+
+  const linkedVendor = await models.Vendor.findOne({
+    where: { taxId: cleanedTaxId },
+    include: [
+      {
+        association: 'organizationLinks',
+        where: { organizationId },
+        required: true,
+      },
+    ],
+  });
+  return linkedVendor || null;
+}
+
+async function ensureVendorLinkedToOrganization(models, vendor, organizationId, actorId) {
+  if (!vendor?.id || !organizationId || !models.VendorOrganization) {
+    return;
+  }
+
+  await models.VendorOrganization.findOrCreate({
+    where: {
+      vendorId: vendor.id,
+      organizationId,
+    },
+    defaults: {
+      vendorId: vendor.id,
+      organizationId,
+      isOwner: organizationId === vendor.organizationId,
+      createdBy: actorId || null,
+      updatedBy: actorId || null,
+    },
+  });
 }
 
 async function userHasActiveOrganizationMembership(models, userId, organizationId) {
@@ -1071,28 +1143,39 @@ async function transferExpense(req, res) {
     };
 
     const requestedVendorId = String(req.body?.vendorId || '').trim();
+    const requestedVendorTaxId = String(req.body?.vendorTaxId || '').trim();
     if (requestedVendorId) {
-      const vendor = await Vendor.findOne({
-        where: {
-          id: requestedVendorId,
-          organizationId: targetOrganizationId,
-        },
-      });
+      const vendor = await findVendorLinkedToOrganization(models, requestedVendorId, targetOrganizationId);
       if (!vendor) {
         return res.status(400).json({ ok: false, message: 'Selected vendor is invalid for the target organization.' });
       }
       payload.vendorId = vendor.id;
-      payload.vendorTaxId = String(req.body?.vendorTaxId || vendor.taxId || expense.vendorTaxId || '').trim() || null;
-    } else if (expense.vendorId) {
-      const existingVendorInTarget = await Vendor.findOne({
-        where: {
-          id: expense.vendorId,
-          organizationId: targetOrganizationId,
-        },
-      });
-      payload.vendorId = existingVendorInTarget ? expense.vendorId : null;
-      if (existingVendorInTarget?.taxId && !expense.vendorTaxId) {
-        payload.vendorTaxId = existingVendorInTarget.taxId;
+      payload.vendorTaxId = requestedVendorTaxId || vendor.taxId || expense.vendorTaxId || null;
+    } else {
+      let resolvedVendor = null;
+      if (expense.vendorId) {
+        resolvedVendor = await findVendorLinkedToOrganization(models, expense.vendorId, targetOrganizationId);
+        if (!resolvedVendor) {
+          const sourceVendor = await Vendor.findByPk(expense.vendorId);
+          if (sourceVendor) {
+            const sourceTaxId = sourceVendor.taxId || expense.vendorTaxId;
+            resolvedVendor = await findVendorByTaxIdForOrganization(models, sourceTaxId, targetOrganizationId);
+            if (!resolvedVendor) {
+              await ensureVendorLinkedToOrganization(models, sourceVendor, targetOrganizationId, userId);
+              resolvedVendor = sourceVendor;
+            }
+          }
+        }
+      }
+      if (!resolvedVendor && expense.vendorTaxId) {
+        resolvedVendor = await findVendorByTaxIdForOrganization(models, expense.vendorTaxId, targetOrganizationId);
+      }
+      if (resolvedVendor) {
+        payload.vendorId = resolvedVendor.id;
+        payload.vendorTaxId = resolvedVendor.taxId || expense.vendorTaxId || null;
+      } else {
+        payload.vendorId = null;
+        payload.vendorTaxId = requestedVendorTaxId || expense.vendorTaxId || null;
       }
     }
 
