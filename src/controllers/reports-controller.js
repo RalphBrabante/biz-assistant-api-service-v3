@@ -1162,6 +1162,7 @@ async function getBirFilingSummary(req, res, next) {
         'expenseDate',
         'vendorId',
         'vendorTaxId',
+        'withholdingTaxTypeId',
         'category',
         'description',
         'currency',
@@ -1320,10 +1321,15 @@ async function getBirFilingSummary(req, res, next) {
         referenceNumber: json.expenseNumber || json.id,
         payeeName,
         payeeTin,
+        withholdingTaxTypeId: withholdingType.id || '',
         atcCode: withholdingType.code || '',
+        withholdingTypeName: withholdingType.name || 'Unclassified withholding tax',
+        grossAmount: roundCurrency(toNumber(json.amount)),
         incomePayment: taxableBase,
+        inputVat: roundCurrency(toNumber(json.taxAmount)),
         rate: toNumber(withholdingType.percentage),
         taxWithheld: amountWithheld,
+        netPayable: roundCurrency(toNumber(json.totalAmount)),
       });
     }
     withholdingSummary.payees = Array.from(payeeMap.values()).sort((a, b) =>
@@ -1360,6 +1366,11 @@ async function getBirFilingSummary(req, res, next) {
         grossSales: roundCurrency(toNumber(json.totalAmount)),
         taxableSales: roundCurrency(toNumber(json.subtotalAmount)),
         outputVat: isVatTaxType(taxType) ? roundCurrency(toNumber(json.taxAmount)) : 0,
+        withholdingTaxTypeId: json.withholdingTaxTypeId || '',
+        atcCode: json.withholdingTaxType?.code || '',
+        withholdingTypeName: json.withholdingTaxType?.name || '',
+        withholdingRate: toNumber(json.withholdingTaxType?.percentage),
+        taxWithheld: roundCurrency(toNumber(json.withHoldingTaxAmount)),
       };
     });
 
@@ -1374,6 +1385,11 @@ async function getBirFilingSummary(req, res, next) {
         grossPurchases: roundCurrency(toNumber(json.totalAmount || json.amount)),
         taxablePurchases: roundCurrency(toNumber(json.taxableAmount || json.amount)),
         inputVat: isVatTaxType(taxType) ? roundCurrency(toNumber(json.taxAmount)) : 0,
+        withholdingTaxTypeId: json.withholdingTaxTypeId || '',
+        atcCode: json.withholdingTaxType?.code || '',
+        withholdingTypeName: json.withholdingTaxType?.name || '',
+        withholdingRate: toNumber(json.withholdingTaxType?.percentage),
+        taxWithheld: roundCurrency(toNumber(json.withHoldingTaxAmount)),
       };
     });
 
