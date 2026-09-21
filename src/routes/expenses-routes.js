@@ -1,6 +1,7 @@
 const express = require('express');
 const {
   createExpense,
+  getExpenseTaxContext,
   importExpenses,
   exportExpenses,
   listTransferTargetOrganizations,
@@ -20,6 +21,7 @@ router.post('/import', authorize('expenses.create'), uploadImportCsv, importExpe
 router.get('/export', authorize('expenses.read'), exportExpenses);
 router.get('/transfer-targets', authorize('expenses.update'), listTransferTargetOrganizations);
 router.get('/', authorize('expenses.read'), listExpenses);
+router.get('/tax-context', authorize(['expenses.read', 'expenses.create', 'expenses.update']), getExpenseTaxContext);
 router.get('/:id', authorize('expenses.read'), getExpenseById);
 router.post('/:id/transfer', authorize('expenses.update'), transferExpense);
 router.put('/:id', authorize('expenses.update'), uploadExpenseImage, updateExpense);

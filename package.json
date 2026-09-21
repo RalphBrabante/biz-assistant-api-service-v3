@@ -5,6 +5,7 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test:expenses": "node --test tests/expense-calculation.test.js tests/expenses-controller.test.js",
     "start": "node dist/main.js",
     "start:legacy": "node src/index.js",
     "start:nest:ts": "node -r ts-node/register src/main.ts",

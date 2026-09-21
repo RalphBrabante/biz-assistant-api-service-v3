@@ -31,6 +31,8 @@ function initExpenseModel(sequelize) {
         allowNull: false,
         defaultValue: 0.0,
       },
+      receiptVatAmount: { type: DataTypes.DECIMAL(12, 2), allowNull: true },
+      withholdingTaxBase: { type: DataTypes.DECIMAL(12, 2), allowNull: true },
       taxableAmount: {
         type: DataTypes.DECIMAL(12, 2),
         allowNull: false,

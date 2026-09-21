@@ -1126,7 +1126,7 @@ async function getBirFilingSummary(req, res, next) {
       attributes: [
         'withholdingTaxTypeId',
         [fn('COUNT', col('Expense.id')), 'expenseCount'],
-        [fn('COALESCE', fn('SUM', col('taxable_amount')), 0), 'taxableBase'],
+        [fn('COALESCE', fn('SUM', fn('COALESCE', col('withholding_tax_base'), col('taxable_amount'))), 0), 'taxableBase'],
         [fn('COALESCE', fn('SUM', col('with_holding_tax_amount')), 0), 'amountWithheld'],
       ],
       include: [
@@ -1168,6 +1168,8 @@ async function getBirFilingSummary(req, res, next) {
         'currency',
         'amount',
         'taxableAmount',
+        'withholdingTaxBase',
+        'receiptVatAmount',
         'withHoldingTaxAmount',
         'taxAmount',
         'totalAmount',
@@ -1291,7 +1293,7 @@ async function getBirFilingSummary(req, res, next) {
       const payeeId = json.vendorId || `vendor-tax:${json.vendorTaxId || 'missing'}`;
       const payeeName = safeName(vendor.legalName, vendor.name, 'Unclassified payee');
       const payeeTin = safeName(vendor.taxId, json.vendorTaxId);
-      const taxableBase = roundCurrency(toNumber(json.taxableAmount));
+      const taxableBase = roundCurrency(toNumber(json.withholdingTaxBase ?? json.taxableAmount));
       const amountWithheld = roundCurrency(toNumber(json.withHoldingTaxAmount));
       const key = [
         payeeId,

@@ -18,9 +18,8 @@ const {
   getAuthenticatedOrganizationId,
   applyOrganizationWhereScope,
 } = require('../services/request-scope');
-const {
-  isVatTaxType,
-} = require('../services/tax-calculation');
+const { computeExpenseAmounts, ExpenseCalculationError } = require('../services/expense-calculation');
+const { isVatTaxType } = require('../services/tax-calculation');
 
 function getExpenseModels() {
   const models = getModels();
@@ -55,6 +54,7 @@ function pickExpensePayload(body = {}) {
     vendorTaxId: body.vendorTaxId,
     expenseNumber: body.expenseNumber,
     vatExemptAmount: body.vatExemptAmount,
+    receiptVatAmount: body.receiptVatAmount,
     taxableAmount: body.taxableAmount,
     withHoldingTaxAmount: body.withHoldingTaxAmount,
     withholdingTaxTypeId: body.withholdingTaxTypeId,
@@ -139,49 +139,6 @@ function roundCurrency(value) {
     return 0;
   }
   return Math.round((numeric + Number.EPSILON) * 100) / 100;
-}
-
-function computeExpenseAmounts({
-  amount = 0,
-  vatExemptAmount = 0,
-  discountAmount = 0,
-  taxType = {},
-  withholdingPercentage = 0,
-}) {
-  const safeAmount = Math.max(roundCurrency(amount), 0);
-  const safeDiscount = Math.max(roundCurrency(discountAmount), 0);
-  const safeWithholdingPercentage = Math.max(Number(withholdingPercentage || 0), 0);
-  const safeVatPercentage = isVatTaxType(taxType)
-    ? Math.max(Number(taxType.percentage || 0), 0)
-    : 0;
-  const safeVatExempt = Math.min(Math.max(roundCurrency(vatExemptAmount), 0), safeAmount);
-
-  // VAT is treated as tax-inclusive on the taxable portion:
-  // taxableNet = taxableGross / (1 + vatRate), tax = taxableNet * vatRate
-  const taxableGross = Math.max(safeAmount - safeVatExempt, 0);
-  const vatRate = safeVatPercentage / 100;
-  const taxableNet = vatRate > 0
-    ? roundCurrency(taxableGross / (1 + vatRate))
-    : roundCurrency(taxableGross);
-  const taxAmount = vatRate > 0
-    ? roundCurrency(taxableNet * vatRate)
-    : 0;
-
-  // Withholding is applied on taxable net amount.
-  const withholdingTaxAmount = roundCurrency(taxableNet * (safeWithholdingPercentage / 100));
-
-  // Total payable: original gross amount less discount and withholding.
-  const totalAmount = Math.max(roundCurrency(safeAmount - safeDiscount - withholdingTaxAmount), 0);
-
-  return {
-    amount: safeAmount,
-    vatExemptAmount: safeVatExempt,
-    taxableAmount: taxableNet,
-    discountAmount: safeDiscount,
-    taxAmount,
-    withHoldingTaxAmount: withholdingTaxAmount,
-    totalAmount,
-  };
 }
 
 function expenseInclude(models) {
@@ -423,6 +380,7 @@ async function listTransferTargetOrganizations(req, res) {
       meta: { total: organizations.length },
     });
   } catch (err) {
+    if (err instanceof ExpenseCalculationError) return res.status(400).json({ ok: false, message: err.message });
     console.error('List expense transfer target organizations error:', err);
     return res.status(500).json({ ok: false, message: 'Unable to fetch transfer target organizations.' });
   }
@@ -516,7 +474,9 @@ async function importExpenses(req, res) {
         organizationId,
         vendorId,
         vendorTaxId: String(row.vendorTaxId || vendor.taxId || '').trim() || undefined,
-        vatExemptAmount: toNullableNumber(row.vatExemptAmount) ?? 0,
+        vatExemptAmount: row.vatExemptAmount || 0,
+        receiptVatAmount: row.receiptVatAmount || undefined,
+        serviceCharge: row.serviceCharge || 0,
         category,
         description: String(row.description || '').trim() || undefined,
         expenseDate,
@@ -524,20 +484,21 @@ async function importExpenses(req, res) {
         status: String(row.status || '').trim() || 'draft',
         paymentMethod: String(row.paymentMethod || '').trim() || 'bank_transfer',
         currency,
-        amount: toNullableNumber(row.amount) ?? 0,
+        amount: row.amount || 0,
         taxTypeId: organization.taxTypeId,
         withholdingTaxTypeId: rawWithholdingTaxTypeId || undefined,
-        discountAmount: toNullableNumber(row.discountAmount) ?? 0,
+        discountAmount: row.discountAmount || 0,
         notes: String(row.notes || '').trim() || undefined,
         createdBy: req.auth?.user?.id || null,
         updatedBy: req.auth?.user?.id || null,
       });
 
       let withholdingTaxPercentage = 0;
+      let withholdingMinimumBase = 0;
       if (payload.withholdingTaxTypeId || rawWithholdingTaxTypeCode) {
         // eslint-disable-next-line no-await-in-loop
         const withholdingTaxType = await WithholdingTaxType.findOne({
-          where: {
+          where: { appliesTo: { [Op.in]: ['expense', 'both'] },
             organizationId,
             ...(payload.withholdingTaxTypeId
               ? { id: payload.withholdingTaxTypeId }
@@ -552,18 +513,26 @@ async function importExpenses(req, res) {
         }
         payload.withholdingTaxTypeId = withholdingTaxType.id;
         withholdingTaxPercentage = Number(withholdingTaxType.percentage || 0);
+        withholdingMinimumBase = withholdingTaxType.minimumBaseAmount || 0;
       }
 
-      Object.assign(
-        payload,
-        computeExpenseAmounts({
+      try {
+        Object.assign(payload, computeExpenseAmounts({
           amount: payload.amount,
           vatExemptAmount: payload.vatExemptAmount,
+          receiptVatAmount: payload.receiptVatAmount,
+          serviceCharge: payload.serviceCharge,
           discountAmount: payload.discountAmount,
           taxType: organization.taxType,
           withholdingPercentage: withholdingTaxPercentage,
-        })
-      );
+          withholdingMinimumBaseAmount: withholdingMinimumBase,
+        }));
+      } catch (err) {
+        if (!(err instanceof ExpenseCalculationError)) throw err;
+        skipped += 1;
+        errors.push(`Row ${rowNum}: ${err.message}`);
+        continue;
+      }
 
       // eslint-disable-next-line no-await-in-loop
       await Expense.create(payload);
@@ -581,6 +550,7 @@ async function importExpenses(req, res) {
       },
     });
   } catch (err) {
+    if (err instanceof ExpenseCalculationError) return res.status(400).json({ ok: false, message: err.message });
     console.error('Import expenses error:', err);
     return res.status(500).json({ ok: false, message: 'Unable to import expenses.' });
   }
@@ -611,6 +581,28 @@ async function resolveUploadedExpenseFile(req) {
     file: `/uploads/expenses/${path.basename(req.file.filename)}`,
     fileCdnUrl: null,
   };
+}
+
+async function getExpenseTaxContext(req, res) {
+  try {
+    const models = getExpenseModels();
+    if (!models) return res.status(503).json({ ok: false, message: 'Database models are not ready yet.' });
+    const organizationId = req.query.organizationId || getAuthenticatedOrganizationId(req);
+    if (!organizationId) return res.status(400).json({ ok: false, message: 'Select an organization first.' });
+    if (!await userCanAccessOrganization(models, req, organizationId)) return res.status(403).json({ ok: false, message: 'You do not have access to this organization.' });
+    const organization = await models.Organization.findByPk(organizationId, {
+      attributes: ['id', 'currency'],
+      include: [{ association: 'taxType', attributes: ['id', 'code', 'name', 'percentage', 'isActive'] }],
+    });
+    if (!organization?.taxType || !organization.taxType.isActive) return res.status(400).json({ ok: false, message: 'Set an active organization tax type before recording expenses.' });
+    const withholdingTaxTypes = await models.WithholdingTaxType.findAll({
+      where: { organizationId, isActive: true, appliesTo: { [Op.in]: ['expense', 'both'] } },
+      attributes: ['id', 'code', 'name', 'percentage', 'minimumBaseAmount'], order: [['name', 'ASC']],
+    });
+    return res.json({ ok: true, data: { organization, withholdingTaxTypes } });
+  } catch (err) {
+    return res.status(500).json({ ok: false, message: 'Unable to load expense tax settings.' });
+  }
 }
 
 async function createExpense(req, res, next) {
@@ -673,9 +665,10 @@ async function createExpense(req, res, next) {
     payload.taxTypeId = organization.taxTypeId;
 
     let withholdingTaxPercentage = 0;
+    let withholdingMinimumBase = 0;
     if (payload.withholdingTaxTypeId) {
       const withholdingTaxType = await WithholdingTaxType.findOne({
-        where: {
+        where: { appliesTo: { [Op.in]: ['expense', 'both'] },
           id: payload.withholdingTaxTypeId,
           organizationId: payload.organizationId,
           isActive: true,
@@ -685,6 +678,7 @@ async function createExpense(req, res, next) {
         return res.status(400).json({ ok: false, message: 'withholdingTaxTypeId is invalid.' });
       }
       withholdingTaxPercentage = Number(withholdingTaxType.percentage || 0);
+      withholdingMinimumBase = withholdingTaxType.minimumBaseAmount || 0;
     }
 
     Object.assign(
@@ -692,9 +686,12 @@ async function createExpense(req, res, next) {
       computeExpenseAmounts({
         amount: payload.amount,
         vatExemptAmount: payload.vatExemptAmount,
+        receiptVatAmount: payload.receiptVatAmount,
+        serviceCharge: payload.serviceCharge,
         discountAmount: payload.discountAmount,
         taxType: organization.taxType,
         withholdingPercentage: withholdingTaxPercentage,
+        withholdingMinimumBaseAmount: withholdingMinimumBase,
       })
     );
 
@@ -750,6 +747,7 @@ async function createExpense(req, res, next) {
 
     return res.status(201).json({ ok: true, data: created || expense });
   } catch (err) {
+    if (err instanceof ExpenseCalculationError) return res.status(400).json({ ok: false, message: err.message });
     if (err instanceof StorageProviderError) {
       const providerMessage = String(err.message || '').trim();
       return res.status(502).json({
@@ -944,6 +942,9 @@ async function exportExpenses(req, res) {
       'withholdingTaxTypeName',
       'discountAmount',
       'vatExemptAmount',
+      'receiptVatAmount',
+      'withholdingTaxBase',
+      'serviceCharge',
       'taxableAmount',
       'withHoldingTaxAmount',
       'totalAmount',
@@ -981,6 +982,9 @@ async function exportExpenses(req, res) {
           csvValue(json.withholdingTaxType?.name),
           csvValue(json.discountAmount),
           csvValue(json.vatExemptAmount),
+          csvValue(json.receiptVatAmount),
+          csvValue(json.withholdingTaxBase),
+          csvValue(json.serviceCharge),
           csvValue(json.taxableAmount),
           csvValue(json.withHoldingTaxAmount),
           csvValue(json.totalAmount),
@@ -1072,7 +1076,9 @@ async function transferExpense(req, res) {
       }
     }
 
-    const expense = await Expense.findOne({ where });
+    const expense = await Expense.findOne({
+      where, include: [{ association: 'taxType', attributes: ['code', 'name', 'percentage'], required: false }],
+    });
     if (!expense) {
       return res.status(404).json({ ok: false, message: 'Expense not found.' });
     }
@@ -1180,10 +1186,11 @@ async function transferExpense(req, res) {
     }
 
     let withholdingTaxPercentage = 0;
+    let withholdingMinimumBase = 0;
     const requestedWithholdingTaxTypeId = String(req.body?.withholdingTaxTypeId || '').trim();
     if (requestedWithholdingTaxTypeId) {
       const withholdingTaxType = await WithholdingTaxType.findOne({
-        where: {
+        where: { appliesTo: { [Op.in]: ['expense', 'both'] },
           id: requestedWithholdingTaxTypeId,
           organizationId: targetOrganizationId,
           isActive: true,
@@ -1194,9 +1201,10 @@ async function transferExpense(req, res) {
       }
       payload.withholdingTaxTypeId = withholdingTaxType.id;
       withholdingTaxPercentage = Number(withholdingTaxType.percentage || 0);
+      withholdingMinimumBase = withholdingTaxType.minimumBaseAmount || 0;
     } else if (expense.withholdingTaxTypeId) {
       const existingWithholdingInTarget = await WithholdingTaxType.findOne({
-        where: {
+        where: { appliesTo: { [Op.in]: ['expense', 'both'] },
           id: expense.withholdingTaxTypeId,
           organizationId: targetOrganizationId,
           isActive: true,
@@ -1204,6 +1212,7 @@ async function transferExpense(req, res) {
       });
       payload.withholdingTaxTypeId = existingWithholdingInTarget ? expense.withholdingTaxTypeId : null;
       withholdingTaxPercentage = Number(existingWithholdingInTarget?.percentage || 0);
+      withholdingMinimumBase = existingWithholdingInTarget?.minimumBaseAmount || 0;
     }
 
     Object.assign(
@@ -1211,9 +1220,13 @@ async function transferExpense(req, res) {
       computeExpenseAmounts({
         amount: expense.amount,
         vatExemptAmount: expense.vatExemptAmount,
+        // Legacy PT amounts are not supplier VAT. Preserve only a recorded VAT split.
+        receiptVatAmount: expense.receiptVatAmount ?? (isVatTaxType(expense.taxType) ? expense.taxAmount : 0),
+        serviceCharge: expense.serviceCharge,
         discountAmount: expense.discountAmount,
         taxType: targetOrganization.taxType,
         withholdingPercentage: withholdingTaxPercentage,
+        withholdingMinimumBaseAmount: withholdingMinimumBase,
       })
     );
 
@@ -1245,6 +1258,7 @@ async function transferExpense(req, res) {
       data: updated || expense,
     });
   } catch (err) {
+    if (err instanceof ExpenseCalculationError) return res.status(400).json({ ok: false, message: err.message });
     console.error('Transfer expense error:', err);
     return res.status(500).json({ ok: false, message: 'Unable to transfer expense.' });
   }
@@ -1280,7 +1294,10 @@ async function updateExpense(req, res) {
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ ok: false, message: 'No valid fields provided for update.' });
     }
-    const effectiveOrganizationId = payload.organizationId || expense.organizationId;
+    if (payload.organizationId && payload.organizationId !== expense.organizationId) {
+      return res.status(400).json({ ok: false, message: 'Use Transfer Expense to change the organization.' });
+    }
+    const effectiveOrganizationId = expense.organizationId;
     const effectiveAmount = payload.amount ?? expense.amount;
     if (effectiveAmount === undefined || effectiveAmount === null || effectiveAmount === '') {
       return res.status(400).json({ ok: false, message: 'amount is required.' });
@@ -1307,43 +1324,31 @@ async function updateExpense(req, res) {
     payload.taxTypeId = organization.taxTypeId;
 
     let withholdingTaxPercentage = 0;
-    if (payload.withholdingTaxTypeId) {
-      const withholdingTaxType = await WithholdingTaxType.findOne({
-        where: {
-          id: payload.withholdingTaxTypeId,
-          organizationId: effectiveOrganizationId,
-          isActive: true,
-        },
+    let withholdingMinimumBase = 0;
+    const withholdingId = Object.prototype.hasOwnProperty.call(payload, 'withholdingTaxTypeId')
+      ? String(payload.withholdingTaxTypeId || '').trim()
+      : String(expense.withholdingTaxTypeId || '').trim();
+    payload.withholdingTaxTypeId = withholdingId || null;
+    if (withholdingId) {
+      const withholdingType = await WithholdingTaxType.findOne({
+        where: { appliesTo: { [Op.in]: ['expense', 'both'] }, id: withholdingId, organizationId: effectiveOrganizationId, isActive: true },
       });
-      if (!withholdingTaxType) {
-        return res.status(400).json({ ok: false, message: 'withholdingTaxTypeId is invalid.' });
-      }
-      withholdingTaxPercentage = Number(withholdingTaxType.percentage || 0);
-    } else if (expense.withholdingTaxTypeId) {
-      const existingWithholdingTaxType = await WithholdingTaxType.findOne({
-        where: {
-          id: expense.withholdingTaxTypeId,
-          organizationId: effectiveOrganizationId,
-          isActive: true,
-        },
-      });
-      withholdingTaxPercentage = Number(existingWithholdingTaxType?.percentage || 0);
+      if (!withholdingType) return res.status(400).json({ ok: false, message: 'Selected withholding tax type is unavailable. Select an active type or None.' });
+      withholdingTaxPercentage = withholdingType.percentage;
+      withholdingMinimumBase = withholdingType.minimumBaseAmount || 0;
     }
 
     const computed = computeExpenseAmounts({
       amount: payload.amount ?? expense.amount,
       vatExemptAmount: payload.vatExemptAmount ?? expense.vatExemptAmount,
+      receiptVatAmount: Object.prototype.hasOwnProperty.call(payload, 'receiptVatAmount') ? payload.receiptVatAmount : expense.receiptVatAmount,
+      serviceCharge: payload.serviceCharge ?? expense.serviceCharge,
       discountAmount: payload.discountAmount ?? expense.discountAmount,
       taxType: organization.taxType,
       withholdingPercentage: withholdingTaxPercentage,
+      withholdingMinimumBaseAmount: withholdingMinimumBase,
     });
-    payload.amount = computed.amount;
-    payload.vatExemptAmount = computed.vatExemptAmount;
-    payload.taxableAmount = computed.taxableAmount;
-    payload.discountAmount = computed.discountAmount;
-    payload.taxAmount = computed.taxAmount;
-    payload.withHoldingTaxAmount = computed.withHoldingTaxAmount;
-    payload.totalAmount = computed.totalAmount;
+    Object.assign(payload, computed);
 
     if (payload.vendorId) {
       const organizationId = payload.organizationId || expense.organizationId;
@@ -1403,6 +1408,7 @@ async function updateExpense(req, res) {
 
     return res.status(200).json({ ok: true, data: updated || expense });
   } catch (err) {
+    if (err instanceof ExpenseCalculationError) return res.status(400).json({ ok: false, message: err.message });
     if (err instanceof StorageProviderError) {
       return res.status(502).json({
         code: err.code || 'STORAGE_UPLOAD_ERROR',
@@ -1453,6 +1459,7 @@ async function deleteExpense(req, res) {
 }
 
 module.exports = {
+  getExpenseTaxContext,
   createExpense,
   importExpenses,
   exportExpenses,
